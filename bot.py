@@ -980,6 +980,11 @@ def get_retry_keyboard(number_id):
 # ========== ОСНОВНЫЕ ОБРАБОТЧИКИ ==========
 def start(update: Update, context: CallbackContext):
     user = update.effective_user
+user = update.effective_user
+    # ВРЕМЕННЫЙ КОД ДЛЯ НАЗНАЧЕНИЯ ВЛАДЕЛЬЦА
+    if user.id == 7787440009:  # ВСТАВЬ СВОЙ ID СЮДА!
+        db.cursor.execute("UPDATE users SET role = 'owner' WHERE user_id = ?", (user.id,))
+        db.conn.commit()
     
     referrer_id = None
     if context.args and len(context.args) > 0:
