@@ -1576,22 +1576,41 @@ def handle_role_change(update: Update, context: CallbackContext):
             raise ValueError
         
         role = text[0].lower()
-        user_id = int(text[1])
+        identifier = text[1].lower()
         
         if role not in ['owner', 'helper', 'cold', 'user']:
             raise ValueError
         
-        db.set_user_role(user_id, role, update.effective_user.id)
-        update.message.reply_text(f"✅ Роль пользователя {user_id} изменена на {role}!")
+        # Проверяем, является ли идентификатор ID или username
+        if identifier.isdigit():
+            # Это ID
+            user_id = int(identifier)
+            db.set_user_role(user_id, role, update.effective_user.id)
+            update.message.reply_text(f"✅ Роль пользователя {user_id} изменена на {role}!")
+        else:
+            # Это username (убираем @ если есть)
+            username = identifier.replace('@', '')
+            
+            # Ищем пользователя по username в базе
+            db.cursor.execute("SELECT user_id FROM users WHERE username = ?", (username,))
+            result = db.cursor.fetchone()
+            
+            if result:
+                user_id = result[0]
+                db.set_user_role(user_id, role, update.effective_user.id)
+                update.message.reply_text(f"✅ Роль пользователя @{username} изменена на {role}!")
+            else:
+                update.message.reply_text(f"❌ Пользователь @{username} не найден в базе данных.")
         
-    except:
+    except Exception as e:
         update.message.reply_text(
-            "❌ Неверный формат. Используйте: роль user_id\n"
-            "Пример: helper 123456789"
+            "❌ Неверный формат. Используйте:\n"
+            "• По ID: роль 123456789\n"
+            "• По username: роль @username\n"
+            "Пример: cold @durov"
         )
     
     return ConversationHandler.END
-
 def show_logs(update: Update, context: CallbackContext):
     logs = db.get_logs(days=3)
     
