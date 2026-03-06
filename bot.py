@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 import os
 import tempfile
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackQueryHandler, ConversationHandler, CallbackContext
 import config
 
@@ -33,8 +33,9 @@ logger = logging.getLogger(__name__)
     WAITING_FOR_FINE_USER,
     WAITING_FOR_FINE_RESET,
     WAITING_FOR_ROLE_CHANGE,
-    WAITING_FOR_QUEUE_REMOVE
-) = range(17)
+    WAITING_FOR_QUEUE_REMOVE,
+    WAITING_FOR_BROADCAST_MESSAGE
+) = range(18)
 
 # Класс для работы с базой данных
 class Database:
@@ -65,6 +66,12 @@ class Database:
                 today_max_numbers INTEGER DEFAULT 0,
                 today_max_working_time INTEGER DEFAULT 0,
                 today_max_crashed INTEGER DEFAULT 0,
+                cold_taken_today INTEGER DEFAULT 0,
+                cold_taken_week INTEGER DEFAULT 0,
+                cold_taken_month INTEGER DEFAULT 0,
+                cold_activated_today INTEGER DEFAULT 0,
+                cold_activated_week INTEGER DEFAULT 0,
+                cold_activated_month INTEGER DEFAULT 0,
                 referred_by INTEGER,
                 referral_count INTEGER DEFAULT 0,
                 referral_balance REAL DEFAULT 0,
@@ -348,6 +355,10 @@ class Database:
             WHERE id = ? AND (taken_by IS NULL OR taken_by = ?)
         ''', (cold_id, number_id, cold_id))
         self.conn.commit()
+        
+        # Обновляем статистику холодки
+        self.update_cold_stats(cold_id, 'taken')
+        
         return self.cursor.rowcount > 0
     
     def take_max_account(self, account_id, cold_id):
@@ -372,7 +383,68 @@ class Database:
             ''', (cold_id, account_id, cold_id))
         
         self.conn.commit()
+        
+        # Обновляем статистику холодки
+        self.update_cold_stats(cold_id, 'taken')
+        
         return self.cursor.rowcount > 0
+    
+    def update_cold_stats(self, cold_id, action):
+        """Обновляет статистику холодки"""
+        today = datetime.now().date()
+        week_ago = datetime.now() - timedelta(days=7)
+        month_ago = datetime.now() - timedelta(days=30)
+        
+        # Считаем взятые номера
+        self.cursor.execute('''
+            SELECT COUNT(*) FROM numbers 
+            WHERE taken_by = ? AND DATE(requested_at) = ?
+        ''', (cold_id, today))
+        taken_today = self.cursor.fetchone()[0]
+        
+        self.cursor.execute('''
+            SELECT COUNT(*) FROM numbers 
+            WHERE taken_by = ? AND requested_at >= ?
+        ''', (cold_id, week_ago))
+        taken_week = self.cursor.fetchone()[0]
+        
+        self.cursor.execute('''
+            SELECT COUNT(*) FROM numbers 
+            WHERE taken_by = ? AND requested_at >= ?
+        ''', (cold_id, month_ago))
+        taken_month = self.cursor.fetchone()[0]
+        
+        # Считаем активированные номера
+        self.cursor.execute('''
+            SELECT COUNT(*) FROM numbers 
+            WHERE taken_by = ? AND status = 'activated' AND DATE(activated_at) = ?
+        ''', (cold_id, today))
+        activated_today = self.cursor.fetchone()[0]
+        
+        self.cursor.execute('''
+            SELECT COUNT(*) FROM numbers 
+            WHERE taken_by = ? AND status = 'activated' AND activated_at >= ?
+        ''', (cold_id, week_ago))
+        activated_week = self.cursor.fetchone()[0]
+        
+        self.cursor.execute('''
+            SELECT COUNT(*) FROM numbers 
+            WHERE taken_by = ? AND status = 'activated' AND activated_at >= ?
+        ''', (cold_id, month_ago))
+        activated_month = self.cursor.fetchone()[0]
+        
+        # Обновляем в таблице пользователей
+        self.cursor.execute('''
+            UPDATE users SET
+                cold_taken_today = ?,
+                cold_taken_week = ?,
+                cold_taken_month = ?,
+                cold_activated_today = ?,
+                cold_activated_week = ?,
+                cold_activated_month = ?
+            WHERE user_id = ?
+        ''', (taken_today, taken_week, taken_month, activated_today, activated_week, activated_month, cold_id))
+        self.conn.commit()
     
     def get_number_by_id(self, number_id):
         self.cursor.execute('SELECT * FROM numbers WHERE id = ?', (number_id,))
@@ -416,6 +488,10 @@ class Database:
         
         self.cursor.execute(query, values)
         self.conn.commit()
+        
+        # Если номер активирован, обновляем статистику холодки
+        if status == 'activated' and 'taken_by' in kwargs:
+            self.update_cold_stats(kwargs['taken_by'], 'activated')
     
     def update_max_status(self, account_id, status, **kwargs):
         query = "UPDATE max_accounts SET status = ?"
@@ -448,6 +524,10 @@ class Database:
         
         self.cursor.execute(query, values)
         self.conn.commit()
+        
+        # Если аккаунт активирован, обновляем статистику холодки
+        if status == 'activated' and 'taken_by' in kwargs:
+            self.update_cold_stats(kwargs['taken_by'], 'activated')
     
     def request_max_code(self, account_id, cold_id):
         self.cursor.execute('''
@@ -611,6 +691,8 @@ class Database:
                     today_max_numbers = 0,
                     today_max_working_time = 0,
                     today_max_crashed = 0,
+                    cold_taken_today = 0,
+                    cold_activated_today = 0,
                     last_reset_date = ?
                 WHERE user_id = ?
             ''', (today, user_id))
@@ -757,7 +839,9 @@ class Database:
                    today_numbers, today_working_time, today_crashed,
                    total_max_numbers, total_max_working_time, total_max_crashed,
                    today_max_numbers, today_max_working_time, today_max_crashed,
-                   qualified_referrals, referral_balance
+                   qualified_referrals, referral_balance,
+                   cold_taken_today, cold_taken_week, cold_taken_month,
+                   cold_activated_today, cold_activated_week, cold_activated_month
             FROM users WHERE user_id = ?
         ''', (user_id,))
         return self.cursor.fetchone()
@@ -788,6 +872,11 @@ class Database:
     def get_all_users_by_role(self):
         self.cursor.execute('SELECT user_id, username, first_name, role FROM users')
         return self.cursor.fetchall()
+    
+    def get_all_user_ids(self):
+        """Получает ID всех пользователей с ролью 'user'"""
+        self.cursor.execute('SELECT user_id FROM users WHERE role = "user"')
+        return [row[0] for row in self.cursor.fetchall()]
 
 # Инициализация базы данных
 db = Database()
@@ -881,6 +970,7 @@ def format_time(seconds):
         return f"{days}д {hours}ч {minutes}мин"
     else:
         return f"{hours}ч {minutes}мин"
+
 # ========== ФУНКЦИИ ДЛЯ INLINE-КЛАВИАТУР ==========
 
 def get_main_menu_keyboard(role):
@@ -893,8 +983,8 @@ def get_main_menu_keyboard(role):
         InlineKeyboardButton("👤 Профиль", callback_data="menu_profile")
     ])
     keyboard.append([
-        InlineKeyboardButton("📊 Очередь", callback_data="menu_queue"),
-        InlineKeyboardButton("📋 Отчет", callback_data="menu_report")
+        InlineKeyboardButton("📊 Моя статистика", callback_data="menu_my_stats"),
+        InlineKeyboardButton("🔄 Проверить очередь", callback_data="menu_queue")
     ])
     keyboard.append([
         InlineKeyboardButton("💰 Рефералы", callback_data="menu_referrals"),
@@ -930,14 +1020,17 @@ def get_submit_menu_keyboard():
     ]
     return InlineKeyboardMarkup(keyboard)
 
-def get_profile_menu_keyboard(user_id):
+def get_profile_menu_keyboard():
     """Меню профиля"""
     keyboard = [
         [
             InlineKeyboardButton("📊 Моя статистика", callback_data="profile_my_stats"),
-            InlineKeyboardButton("🔰 Поддержка", callback_data="menu_support")
+            InlineKeyboardButton("💰 Рефералы", callback_data="menu_referrals")
         ],
-        [InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")]
+        [
+            InlineKeyboardButton("🔰 Поддержка", callback_data="menu_support"),
+            InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")
+        ]
     ]
     return InlineKeyboardMarkup(keyboard)
 
@@ -956,7 +1049,10 @@ def get_cold_panel_keyboard():
             InlineKeyboardButton("📋 Мои WhatsApp", callback_data="cold_my_wa"),
             InlineKeyboardButton("📋 Мои MAX", callback_data="cold_my_max")
         ],
-        [InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")]
+        [
+            InlineKeyboardButton("📊 Статистика холодки", callback_data="cold_stats"),
+            InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")
+        ]
     ]
     return InlineKeyboardMarkup(keyboard)
 
@@ -997,12 +1093,15 @@ def get_owner_panel_keyboard():
             InlineKeyboardButton("📋 Логи", callback_data="owner_logs"),
             InlineKeyboardButton("🗑 Удалить из очереди", callback_data="owner_remove_queue")
         ],
-        [InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")]
+        [
+            InlineKeyboardButton("📢 Рассылка", callback_data="owner_broadcast"),
+            InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")
+        ]
     ]
     return InlineKeyboardMarkup(keyboard)
 
 def get_back_keyboard(target):
-    """Клавиатура только с кнопкой назад (для состояний ожидания)"""
+    """Клавиатура только с кнопкой назад"""
     keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data=f"back_to_{target}")]]
     return InlineKeyboardMarkup(keyboard)
 
@@ -1101,12 +1200,12 @@ def handle_callback(update: Update, context: CallbackContext):
         show_profile(query, context, user_id)
         return
     
-    elif data == "menu_queue":
-        check_user_queue(query, context, user_id)
+    elif data == "menu_my_stats" or data == "profile_my_stats":
+        generate_user_report_file(query, context, user_id)
         return
     
-    elif data == "menu_report":
-        generate_user_report_file(query, context, user_id)
+    elif data == "menu_queue":
+        check_user_queue(query, context, user_id)
         return
     
     elif data == "menu_referrals":
@@ -1159,10 +1258,10 @@ def handle_callback(update: Update, context: CallbackContext):
         )
         return WAITING_FOR_MAX_NUMBER
     
-    # ===== ПРОФИЛЬ =====
+    # ===== СТАТИСТИКА ХОЛОДКИ =====
     
-    elif data == "profile_my_stats":
-        generate_user_report_file(query, context, user_id)
+    elif data == "cold_stats" and role in ['cold', 'helper', 'owner']:
+        show_cold_stats(query, context, user_id)
         return
     
     # ===== ПАНЕЛЬ ХОЛОДКИ =====
@@ -1291,6 +1390,15 @@ def handle_callback(update: Update, context: CallbackContext):
         )
         return WAITING_FOR_QUEUE_REMOVE
     
+    elif data == "owner_broadcast" and role == 'owner':
+        query.edit_message_text(
+            "📢 Введите сообщение, которое хотите отправить **всем пользователям**:\n\n"
+            "Поддерживаются текст, ссылки, эмодзи. Сообщение придет как обычный текст.",
+            parse_mode='Markdown',
+            reply_markup=get_back_keyboard("owner_panel")
+        )
+        return WAITING_FOR_BROADCAST_MESSAGE
+    
     # ===== ОБРАБОТЧИКИ ДЛЯ ШТРАФОВ =====
     
     elif data == "fines_list_all":
@@ -1395,10 +1503,8 @@ def handle_callback(update: Update, context: CallbackContext):
             text += "• Запросить доп информацию\n"
             text += "• Отметить активацию"
             
-            query.edit_message_text(
-                text,
-                reply_markup=get_max_action_keyboard(account_id, user_id, 'in_progress')
-            )
+            keyboard = get_max_action_keyboard(account_id, user_id, 'in_progress')
+            query.edit_message_text(text, reply_markup=keyboard)
         else:
             query.edit_message_text("❌ Аккаунт уже взят другим.")
         return
@@ -1458,7 +1564,8 @@ def handle_callback(update: Update, context: CallbackContext):
             account_id,
             'activated',
             activated_at=activated_time,
-            in_queue=0
+            in_queue=0,
+            taken_by=user_id
         )
         
         context.bot.send_message(
@@ -1572,7 +1679,8 @@ def handle_callback(update: Update, context: CallbackContext):
                 number_id, 
                 'activated', 
                 activated_at=activated_time,
-                in_queue=0
+                in_queue=0,
+                taken_by=user_id
             )
             
             context.bot.send_message(
@@ -1767,6 +1875,7 @@ def handle_callback(update: Update, context: CallbackContext):
         db.update_max_status(account_id, 'cancelled', in_queue=0, taken_by=None)
         query.edit_message_text("❌ Аккаунт убран из очереди.", reply_markup=get_main_menu_keyboard(role))
         return
+
 # ========== ФУНКЦИИ ДЛЯ WHATSAPP ==========
 
 def show_whatsapp_queue(update, context):
@@ -2055,44 +2164,66 @@ def show_all_max_queue(update, context):
         reply_markup=get_back_keyboard(panel)
     )
 
-# ========== ФУНКЦИИ ДЛЯ РЕФЕРАЛОВ, ПРОФИЛЯ И Т.Д. ==========
+# ========== ФУНКЦИИ ДЛЯ ПРОФИЛЯ И СТАТИСТИКИ ==========
 
 def show_profile(update, context, user_id):
     """Показывает профиль пользователя"""
-    stats = db.get_user_stats(user_id)
-    
-    if not stats:
-        update.edit_message_text(
-            "❌ Ошибка получения статистики.",
-            reply_markup=get_main_menu_keyboard(db.get_user_role(user_id))
-        )
-        return
-    
-    (wa_total, wa_time, wa_crashed, wa_today, wa_today_time, wa_today_crashed,
-     max_total, max_time, max_crashed, max_today, max_today_time, max_today_crashed,
-     referrals, ref_balance) = stats
-    
     user = update.from_user
+    role = db.get_user_role(user_id)
+    
     text = (
         f"👤 **Профиль пользователя**\n\n"
-        f"@{user.username or 'нет username'}\n\n"
-        f"💰 **Реферальный баланс:** ${ref_balance:.2f}\n"
-        f"👥 **Рефералов:** {referrals}\n\n"
-        f"📱 **WhatsApp:**\n"
-        f"   За все время: {wa_total} номеров, {format_time(wa_time)}, слетело {wa_crashed}\n"
-        f"   За сегодня: {wa_today} номеров, {format_time(wa_today_time)}, слетело {wa_today_crashed}\n\n"
-        f"📲 **MAX:**\n"
-        f"   За все время: {max_total} аккаунтов, {format_time(max_time)}, слетело {max_crashed}\n"
-        f"   За сегодня: {max_today} аккаунтов, {format_time(max_today_time)}, слетело {max_today_crashed}\n\n"
+        f"**ID:** {user_id}\n"
+        f"**Username:** @{user.username or 'нет'}\n"
+        f"**Имя:** {user.first_name}\n"
+        f"**Роль:** {get_role_name(role)}\n\n"
         f"📢 **Наша группа:** [Присоединяйся!](https://t.me/+owH-s8y7T8RmZGEy)\n"
-        f"⭐ **Репутация:** [@reputatiooonnn](https://t.me/reputatiooonnn)"
+        f"⭐ **Репутация:** [@reputatiooonnn](https://t.me/reputatiooonnn)\n\n"
+        f"📊 Для просмотра статистики нажмите кнопку ниже."
     )
     
     update.edit_message_text(
         text,
         parse_mode='Markdown',
         disable_web_page_preview=True,
-        reply_markup=get_profile_menu_keyboard(user_id)
+        reply_markup=get_profile_menu_keyboard()
+    )
+
+def show_cold_stats(update, context, cold_id):
+    """Показывает статистику холодки"""
+    stats = db.get_user_stats(cold_id)
+    
+    if not stats:
+        update.edit_message_text(
+            "❌ Ошибка получения статистики.",
+            reply_markup=get_cold_panel_keyboard()
+        )
+        return
+    
+    # Индексы для статистики холодки
+    cold_taken_today = stats[14] if len(stats) > 14 else 0
+    cold_taken_week = stats[15] if len(stats) > 15 else 0
+    cold_taken_month = stats[16] if len(stats) > 16 else 0
+    cold_activated_today = stats[17] if len(stats) > 17 else 0
+    cold_activated_week = stats[18] if len(stats) > 18 else 0
+    cold_activated_month = stats[19] if len(stats) > 19 else 0
+    
+    text = (
+        f"❄️ **Статистика холодки**\n\n"
+        f"**Взято номеров:**\n"
+        f"• За сегодня: {cold_taken_today}\n"
+        f"• За неделю: {cold_taken_week}\n"
+        f"• За месяц: {cold_taken_month}\n\n"
+        f"**Активировано:**\n"
+        f"• За сегодня: {cold_activated_today}\n"
+        f"• За неделю: {cold_activated_week}\n"
+        f"• За месяц: {cold_activated_month}\n"
+    )
+    
+    update.edit_message_text(
+        text,
+        parse_mode='Markdown',
+        reply_markup=get_cold_panel_keyboard()
     )
 
 def show_referral_info(update, context, user_id):
@@ -2958,6 +3089,40 @@ def handle_queue_remove(update: Update, context: CallbackContext):
     
     return ConversationHandler.END
 
+def handle_broadcast_message(update: Update, context: CallbackContext):
+    """Отправляет сообщение всем пользователям"""
+    message_text = update.message.text
+    sender_id = update.effective_user.id
+    
+    # Получаем всех пользователей
+    user_ids = db.get_all_user_ids()
+    
+    sent_count = 0
+    failed_count = 0
+    
+    for user_id in user_ids:
+        try:
+            context.bot.send_message(
+                chat_id=user_id,
+                text=f"📢 **Сообщение от администрации:**\n\n{message_text}",
+                parse_mode='Markdown'
+            )
+            sent_count += 1
+        except Exception as e:
+            logger.error(f"Failed to send broadcast to {user_id}: {e}")
+            failed_count += 1
+    
+    update.message.reply_text(
+        f"✅ Рассылка завершена!\n"
+        f"📤 Отправлено: {sent_count}\n"
+        f"❌ Не удалось: {failed_count}",
+        reply_markup=get_owner_panel_keyboard()
+    )
+    
+    db.add_log(sender_id, update.effective_user.username, 'broadcast', f'Sent message to {sent_count} users', 'admin')
+    
+    return ConversationHandler.END
+
 def handle_role_change(update: Update, context: CallbackContext):
     """Обработка назначения ролей по ID или username"""
     try:
@@ -2967,8 +3132,7 @@ def handle_role_change(update: Update, context: CallbackContext):
         if len(parts) != 2:
             update.message.reply_text(
                 "❌ Нужно ввести: роль и ID/username\n"
-                "Пример: cold 123456789 или helper @username",
-                reply_markup=get_owner_panel_keyboard()
+                "Пример: cold 123456789 или helper @username"
             )
             return
         
@@ -2977,8 +3141,7 @@ def handle_role_change(update: Update, context: CallbackContext):
         
         if role not in ['owner', 'helper', 'cold', 'user']:
             update.message.reply_text(
-                "❌ Неверная роль. Доступны: owner, helper, cold, user",
-                reply_markup=get_owner_panel_keyboard()
+                "❌ Неверная роль. Доступны: owner, helper, cold, user"
             )
             return
         
@@ -3207,22 +3370,25 @@ def main():
     )
     dp.add_handler(queue_remove_conv)
     
-        # ===== ОБРАБОТКА НАЗНАЧЕНИЯ РОЛЕЙ =====
-    # dp.add_handler(MessageHandler(
-    #     Filters.regex(r'^(owner|helper|cold|user) (@?\w+|\d+)$') & 
-    #     Filters.user(user_id=lambda u: db.get_user_role(u) == 'owner'), 
-    #     handle_role_change
-    # ))
+    # ===== РАССЫЛКА =====
+    broadcast_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(handle_callback, pattern='^owner_broadcast$')],
+        states={
+            WAITING_FOR_BROADCAST_MESSAGE: [MessageHandler(Filters.text & ~Filters.command, handle_broadcast_message)]
+        },
+        fallbacks=[CommandHandler('cancel', cancel)]
+    )
+    dp.add_handler(broadcast_conv)
     
-    # ===== ОСНОВНЫЕ ОБРАБОТЧИКИ =====
-    dp.add_handler(CommandHandler('start', start))
-    dp.add_handler(CallbackQueryHandler(handle_callback))
-
-    # ===== ОБРАБОТКА КОМАНД НАЗНАЧЕНИЯ РОЛЕЙ (новая версия) =====
+    # ===== ОБРАБОТКА НАЗНАЧЕНИЯ РОЛЕЙ =====
     dp.add_handler(MessageHandler(
         Filters.text & Filters.regex(r'^(owner|helper|cold|user) ') & Filters.update,
         handle_role_change
     ))
+    
+    # ===== ОСНОВНЫЕ ОБРАБОТЧИКИ =====
+    dp.add_handler(CommandHandler('start', start))
+    dp.add_handler(CallbackQueryHandler(handle_callback))
     
     # ===== ФОНОВЫЕ ЗАДАЧИ =====
     from telegram.ext import JobQueue
