@@ -1110,7 +1110,7 @@ def get_back_keyboard(target):
 def start(update: Update, context: CallbackContext):
     user = update.effective_user
     
-        referrer_id = None
+    referrer_id = None
     if context.args and len(context.args) > 0:
         try:
             referrer_id = int(context.args[0])
@@ -1145,34 +1145,6 @@ def start(update: Update, context: CallbackContext):
     )
     
     db.add_log(user.id, user.username, 'user_start', 'Started bot', 'auth')
-
-def handle_agreement(update: Update, context: CallbackContext):
-    query = update.callback_query
-    query.answer()
-    
-    user_id = query.from_user.id
-    
-    if query.data == "accept_agreement":
-        db.accept_agreement(user_id)
-        
-        query.edit_message_text(
-            "✅ Спасибо! Вы приняли пользовательское соглашение.\n\n"
-            "Теперь вы можете пользоваться ботом.",
-            parse_mode='Markdown'
-        )
-        
-        role = db.get_user_role(user_id)
-        welcome_text = WELCOME_TEXT + f"\n\n👋 Привет, {query.from_user.first_name}! Твой статус: {get_role_name(role)}"
-        
-        context.bot.send_message(
-            chat_id=user_id,
-            text=welcome_text,
-            parse_mode='Markdown',
-            disable_web_page_preview=True,
-            reply_markup=get_main_menu_keyboard(role)
-        )
-    
-    return ConversationHandler.END
 
 def handle_callback(update: Update, context: CallbackContext):
     query = update.callback_query
