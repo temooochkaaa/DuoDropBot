@@ -1172,6 +1172,54 @@ def handle_message(update: Update, context: CallbackContext):
             return WAITING_FOR_QUEUE_REMOVE
     
     elif role == 'owner':
+# ДИАГНОСТИКА
+        print(f"👑 Owner command received: {text}")
+        
+        # Проверяем, не является ли сообщение командой назначения роли
+        if text.startswith(('owner ', 'helper ', 'cold ', 'user ')):
+            print(f"📝 Role assignment detected: {text}")
+            try:
+                parts = text.split()
+                if len(parts) != 2:
+                    print("❌ Wrong format - not 2 parts")
+                    update.message.reply_text("❌ Используйте: роль ID\nПример: cold 123456789")
+                    return
+                
+                new_role = parts[0].lower()
+                identifier = parts[1]
+                
+                print(f"🎭 Role: {new_role}, Identifier: {identifier}")
+                
+                if new_role not in ['owner', 'helper', 'cold', 'user']:
+                    print(f"❌ Invalid role: {new_role}")
+                    update.message.reply_text("❌ Неверная роль. Доступны: owner, helper, cold, user")
+                    return
+                
+                # Поиск пользователя
+                if identifier.isdigit():
+                    print(f"🔍 Searching by ID: {identifier}")
+                    user_id = int(identifier)
+                    db.set_user_role(user_id, new_role, update.effective_user.id)
+                    update.message.reply_text(f"✅ Роль пользователя {user_id} изменена на {new_role}!")
+                    print(f"✅ Role changed for ID {user_id}")
+                else:
+                    username = identifier.replace('@', '')
+                    print(f"🔍 Searching by username: {username}")
+                    db.cursor.execute("SELECT user_id FROM users WHERE username = ?", (username,))
+                    result = db.cursor.fetchone()
+                    if result:
+                        user_id = result[0]
+                        db.set_user_role(user_id, new_role, update.effective_user.id)
+                        update.message.reply_text(f"✅ Роль пользователя @{username} изменена на {new_role}!")
+                        print(f"✅ Role changed for @{username}")
+                    else:
+                        print(f"❌ User @{username} not found in database")
+                        update.message.reply_text(f"❌ Пользователь @{username} не найден")
+                        
+            except Exception as e:
+                print(f"🔥 EXCEPTION: {e}")
+                update.message.reply_text(f"❌ Ошибка: {e}")
+            return
         if text == "📊 WhatsApp статистика":
             generate_whatsapp_daily_stats(update, context)
         
