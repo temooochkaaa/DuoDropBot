@@ -271,7 +271,28 @@ class Database:
         ''', (group_id, group_name))
         self.conn.commit()
     
+    def check_duplicate_number(self, user_id, phone_number, platform):
+        """Проверяет, есть ли уже такой номер у пользователя в активных статусах"""
+        if platform == 'whatsapp':
+            self.cursor.execute('''
+                SELECT id, status FROM numbers 
+                WHERE user_id = ? AND phone_number = ? 
+                AND status IN ('pending', 'in_progress', 'code_sent', 'code_entered', 'activated')
+            ''', (user_id, phone_number))
+        else:
+            self.cursor.execute('''
+                SELECT id, status FROM max_accounts 
+                WHERE user_id = ? AND phone_number = ? 
+                AND status IN ('pending', 'in_progress', 'waiting_code', 'code_received', 'activated')
+            ''', (user_id, phone_number))
+        return self.cursor.fetchone()
+    
     def create_whatsapp_request(self, user_id, phone_number, request_type):
+        # Проверяем на дубликат
+        duplicate = self.check_duplicate_number(user_id, phone_number, 'whatsapp')
+        if duplicate:
+            return None, duplicate[1]
+        
         self.cursor.execute('SELECT MAX(queue_position) FROM numbers WHERE status = "pending" AND in_queue = 1 AND platform = "whatsapp"')
         max_pos = self.cursor.fetchone()[0]
         next_position = (max_pos or 0) + 1
@@ -284,6 +305,11 @@ class Database:
         return self.cursor.lastrowid, next_position
     
     def create_max_request(self, user_id, phone_number):
+        # Проверяем на дубликат
+        duplicate = self.check_duplicate_number(user_id, phone_number, 'max')
+        if duplicate:
+            return None, duplicate[1]
+        
         self.cursor.execute('SELECT MAX(queue_position) FROM max_accounts WHERE status = "pending" AND in_queue = 1')
         max_pos = self.cursor.fetchone()[0]
         next_position = (max_pos or 0) + 1
@@ -356,10 +382,10 @@ class Database:
         ''', (cold_id, number_id, cold_id))
         self.conn.commit()
         
-        # Обновляем статистику холодки
-        self.update_cold_stats(cold_id, 'taken')
-        
-        return self.cursor.rowcount > 0
+        if self.cursor.rowcount > 0:
+            self.update_cold_stats(cold_id, 'taken')
+            return True
+        return False
     
     def take_max_account(self, account_id, cold_id):
         self.cursor.execute('SELECT taken_by, status FROM max_accounts WHERE id = ?', (account_id,))
@@ -384,10 +410,10 @@ class Database:
         
         self.conn.commit()
         
-        # Обновляем статистику холодки
-        self.update_cold_stats(cold_id, 'taken')
-        
-        return self.cursor.rowcount > 0
+        if self.cursor.rowcount > 0:
+            self.update_cold_stats(cold_id, 'taken')
+            return True
+        return False
     
     def update_cold_stats(self, cold_id, action):
         """Обновляет статистику холодки"""
@@ -980,17 +1006,13 @@ def get_main_menu_keyboard(role):
     """Главное меню с inline-кнопками"""
     keyboard = []
     
-    # Основные кнопки для всех
+    # Основные кнопки для всех (без статистики и рефералов)
     keyboard.append([
         InlineKeyboardButton("📱 Сдать номер", callback_data="menu_submit"),
         InlineKeyboardButton("👤 Профиль", callback_data="menu_profile")
     ])
     keyboard.append([
-        InlineKeyboardButton("📊 Моя статистика", callback_data="menu_my_stats"),
-        InlineKeyboardButton("🔄 Проверить очередь", callback_data="menu_queue")
-    ])
-    keyboard.append([
-        InlineKeyboardButton("💰 Рефералы", callback_data="menu_referrals"),
+        InlineKeyboardButton("🔄 Проверить очередь", callback_data="menu_queue"),
         InlineKeyboardButton("🔰 Поддержка", callback_data="menu_support")
     ])
     
@@ -1028,7 +1050,7 @@ def get_profile_menu_keyboard():
     keyboard = [
         [
             InlineKeyboardButton("📊 Моя статистика", callback_data="profile_my_stats"),
-            InlineKeyboardButton("💰 Рефералы", callback_data="menu_referrals")
+            InlineKeyboardButton("💰 Рефералы", callback_data="profile_referrals")
         ],
         [
             InlineKeyboardButton("🔰 Поддержка", callback_data="menu_support"),
@@ -1038,7 +1060,7 @@ def get_profile_menu_keyboard():
     return InlineKeyboardMarkup(keyboard)
 
 def get_cold_panel_keyboard():
-    """Панель холодки"""
+    """Панель холодки (только рабочие функции)"""
     keyboard = [
         [
             InlineKeyboardButton("🆕 Запросить WhatsApp", callback_data="cold_request_wa"),
@@ -1117,7 +1139,6 @@ def start(update: Update, context: CallbackContext):
     if context.args and len(context.args) > 0:
         try:
             referrer_id = int(context.args[0])
-            # Добавляем лог
             db.add_log(user.id, user.username, 'referral_click', f'Clicked referral link from {referrer_id}', 'referral')
         except:
             pass
@@ -1206,7 +1227,7 @@ def show_my_referrals(update, context, user_id):
         text += "У вас пока нет рефералов.\n\n"
         text += "Приглашайте друзей по вашей реферальной ссылке!"
     
-    keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="menu_referrals")]]
+    keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="menu_profile")]]
     
     update.edit_message_text(
         text,
@@ -1254,7 +1275,7 @@ def show_referral_info(update, context, user_id):
             InlineKeyboardButton("👥 Мои рефералы", callback_data="my_referrals"),
             InlineKeyboardButton("🔄 Обновить", callback_data="refresh_referral")
         ],
-        [InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")]
+        [InlineKeyboardButton("🔙 Назад", callback_data="menu_profile")]
     ]
     
     update.edit_message_text(
@@ -1268,7 +1289,6 @@ def show_profile(update, context, user_id):
     user = update.from_user
     role = db.get_user_role(user_id)
     
-    # Получаем реферальную информацию
     ref_info = db.get_referral_info(user_id)
     ref_balance = ref_info[1] if ref_info else 0
     
@@ -1280,8 +1300,7 @@ def show_profile(update, context, user_id):
         f"**Роль:** {get_role_name(role)}\n"
         f"💰 **Реферальный баланс:** ${ref_balance:.2f}\n\n"
         f"📢 **Наша группа:** [Присоединяйся!](https://t.me/+owH-s8y7T8RmZGEy)\n"
-        f"⭐ **Репутация:** [@reputatiooonnn](https://t.me/reputatiooonnn)\n\n"
-        f"📊 Для просмотра статистики нажмите кнопку ниже."
+        f"⭐ **Репутация:** [@reputatiooonnn](https://t.me/reputatiooonnn)"
     )
     
     update.edit_message_text(
@@ -1319,16 +1338,16 @@ def handle_callback(update: Update, context: CallbackContext):
         show_profile(query, context, user_id)
         return
     
-    elif data == "menu_my_stats" or data == "profile_my_stats":
+    elif data == "profile_my_stats":
         generate_user_report_file(query, context, user_id)
+        return
+    
+    elif data == "profile_referrals":
+        show_referral_info(query, context, user_id)
         return
     
     elif data == "menu_queue":
         check_user_queue(query, context, user_id)
-        return
-    
-    elif data == "menu_referrals":
-        show_referral_info(query, context, user_id)
         return
     
     elif data == "menu_support":
@@ -1367,7 +1386,7 @@ def handle_callback(update: Update, context: CallbackContext):
         query.edit_message_text(
             "📞 Введите номер телефона для WhatsApp в международном формате (например: 79123456789):",
             reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")
+                InlineKeyboardButton("🔙 Назад", callback_data="menu_submit")
             ]])
         )
         return WAITING_FOR_NUMBER
@@ -1376,7 +1395,7 @@ def handle_callback(update: Update, context: CallbackContext):
         query.edit_message_text(
             "📞 Введите номер телефона для MAX в международном формате (например: 79123456789):",
             reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")
+                InlineKeyboardButton("🔙 Назад", callback_data="menu_submit")
             ]])
         )
         return WAITING_FOR_MAX_NUMBER
@@ -2043,7 +2062,6 @@ def show_whatsapp_queue(update, context):
             reply_markup=keyboard
         )
     
-    # Отправляем сообщение с кнопкой назад
     context.bot.send_message(
         chat_id=update.from_user.id,
         text="Выберите номер для работы или вернитесь назад:",
@@ -2085,7 +2103,6 @@ def show_max_queue(update, context):
             reply_markup=keyboard
         )
     
-    # Отправляем сообщение с кнопкой назад
     context.bot.send_message(
         chat_id=update.from_user.id,
         text="Выберите аккаунт для работы или вернитесь назад:",
@@ -2143,7 +2160,6 @@ def show_my_whatsapp(update, context, cold_id):
                 text=msg
             )
     
-    # Отправляем сообщение с кнопкой назад
     context.bot.send_message(
         chat_id=update.from_user.id,
         text="Список ваших активных номеров. Вернуться назад:",
@@ -2199,7 +2215,6 @@ def show_my_max(update, context, cold_id):
                 text=msg
             )
     
-    # Отправляем сообщение с кнопкой назад
     context.bot.send_message(
         chat_id=update.from_user.id,
         text="Список ваших активных аккаунтов. Вернуться назад:",
@@ -2224,7 +2239,6 @@ def show_all_whatsapp_queue(update, context):
         msg += f"{type_emoji} #{req[0]} (Поз.{req[14]}) {req[1]} - {taken_by}\n"
     
     if len(msg) > 4000:
-        # Если слишком длинно, отправляем файлом
         filename = f"wa_queue_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
         create_stats_file(filename, msg)
         with open(filename, 'rb') as f:
@@ -2242,7 +2256,6 @@ def show_all_whatsapp_queue(update, context):
             parse_mode='Markdown'
         )
     
-    # Отправляем кнопку назад
     role = db.get_user_role(update.from_user.id)
     panel = "helper_panel" if role == 'helper' else "owner_panel"
     context.bot.send_message(
@@ -2286,7 +2299,6 @@ def show_all_max_queue(update, context):
             parse_mode='Markdown'
         )
     
-    # Отправляем кнопку назад
     role = db.get_user_role(update.from_user.id)
     panel = "helper_panel" if role == 'helper' else "owner_panel"
     context.bot.send_message(
@@ -2306,7 +2318,6 @@ def show_cold_stats(update, context, cold_id):
         )
         return
     
-    # Индексы для статистики холодки
     cold_taken_today = stats[14] if len(stats) > 14 else 0
     cold_taken_week = stats[15] if len(stats) > 15 else 0
     cold_taken_month = stats[16] if len(stats) > 16 else 0
@@ -2443,7 +2454,6 @@ def show_logs(update, context):
     
     os.remove(filename)
     
-    # Отправляем кнопку назад
     context.bot.send_message(
         chat_id=update.from_user.id,
         text="Вернуться назад:",
@@ -2559,12 +2569,11 @@ def generate_user_report_file(update, context, user_id):
     
     os.remove(filename)
     
-    # Отправляем кнопку назад в главное меню
     role = db.get_user_role(user_id)
     context.bot.send_message(
         chat_id=user_id,
-        text="📊 Отчет отправлен. Вернуться в меню:",
-        reply_markup=get_main_menu_keyboard(role)
+        text="📊 Отчет отправлен. Вернуться в профиль:",
+        reply_markup=get_back_keyboard("profile")
     )
 
 def generate_whatsapp_stats_file(update, context):
@@ -2572,7 +2581,7 @@ def generate_whatsapp_stats_file(update, context):
     today = datetime.now().date()
     stats = db.get_daily_stats(today, 'whatsapp')
     
-    if not any(row[3] for row in stats):  # проверяем, есть ли номера
+    if not any(row[3] for row in stats):
         update.edit_message_text(
             "📊 За сегодня нет данных по WhatsApp.",
             reply_markup=get_back_keyboard("helper_panel")
@@ -2622,7 +2631,6 @@ def generate_whatsapp_stats_file(update, context):
     
     os.remove(filename)
     
-    # Отправляем кнопку назад
     role = db.get_user_role(update.from_user.id)
     panel = "helper_panel" if role == 'helper' else "owner_panel"
     context.bot.send_message(
@@ -2686,7 +2694,6 @@ def generate_max_stats_file(update, context):
     
     os.remove(filename)
     
-    # Отправляем кнопку назад
     role = db.get_user_role(update.from_user.id)
     panel = "helper_panel" if role == 'helper' else "owner_panel"
     context.bot.send_message(
@@ -2705,7 +2712,7 @@ def handle_whatsapp_number_input(update: Update, context: CallbackContext):
         update.message.reply_text(
             "❌ Неверный формат номера. Попробуйте снова:",
             reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")
+                InlineKeyboardButton("🔙 Назад", callback_data="menu_submit")
             ]])
         )
         return WAITING_FOR_NUMBER
@@ -2718,7 +2725,7 @@ def handle_whatsapp_number_input(update: Update, context: CallbackContext):
             InlineKeyboardButton("📝 Обычный код", callback_data="type_code"),
             InlineKeyboardButton("📷 QR код", callback_data="type_qr")
         ],
-        [InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")]
+        [InlineKeyboardButton("🔙 Назад", callback_data="menu_submit")]
     ]
     update.message.reply_text(
         "📱 Выберите тип получения кода для WhatsApp:",
@@ -2734,12 +2741,27 @@ def handle_max_number_input(update: Update, context: CallbackContext):
         update.message.reply_text(
             "❌ Неверный формат номера. Попробуйте снова:",
             reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")
+                InlineKeyboardButton("🔙 Назад", callback_data="menu_submit")
             ]])
         )
         return WAITING_FOR_MAX_NUMBER
     
     account_id, queue_pos = db.create_max_request(user_id, phone_number)
+    
+    if account_id is None:
+        status_text = {
+            'pending': 'ожидает в очереди',
+            'in_progress': 'в работе у холодки',
+            'waiting_code': 'ожидает код',
+            'code_received': 'код получен',
+            'activated': 'активирован'
+        }.get(queue_pos, 'активен')
+        update.message.reply_text(
+            f"❌ Номер {phone_number} уже был добавлен ранее и сейчас {status_text}. Дождитесь обработки или результата.",
+            reply_markup=get_main_menu_keyboard(db.get_user_role(user_id))
+        )
+        return ConversationHandler.END
+    
     db.update_user_stats(user_id, 'new_number', platform='max')
     
     cold_staff = db.get_all_cold_staff()
@@ -2772,14 +2794,6 @@ def handle_type_selection(update: Update, context: CallbackContext):
     phone_number = context.user_data.get('temp_phone')
     platform = context.user_data.get('platform', 'whatsapp')
     
-    if selection == "back_to_main":
-        role = db.get_user_role(user_id)
-        query.edit_message_text(
-            "🔙 Главное меню",
-            reply_markup=get_main_menu_keyboard(role)
-        )
-        return ConversationHandler.END
-    
     if selection == "type_code":
         request_type = 'code'
         type_text = "обычный код"
@@ -2789,6 +2803,29 @@ def handle_type_selection(update: Update, context: CallbackContext):
     
     if platform == 'whatsapp':
         number_id, queue_pos = db.create_whatsapp_request(user_id, phone_number, request_type)
+        
+        if number_id is None:
+            status_text = {
+                'pending': 'ожидает в очереди',
+                'in_progress': 'в работе у холодки',
+                'code_sent': 'код отправлен',
+                'code_entered': 'код введен',
+                'activated': 'активирован'
+            }.get(queue_pos, 'активен')
+            query.edit_message_text(
+                f"❌ Номер {phone_number} уже был добавлен ранее и сейчас {status_text}. Дождитесь обработки или результата.",
+                reply_markup=None
+            )
+            role = db.get_user_role(user_id)
+            context.bot.send_message(
+                chat_id=user_id,
+                text="Вернуться в главное меню:",
+                reply_markup=get_main_menu_keyboard(role)
+            )
+            context.user_data.pop('temp_phone', None)
+            context.user_data.pop('platform', None)
+            return ConversationHandler.END
+        
         db.update_user_stats(user_id, 'new_number', platform='whatsapp')
         
         cold_staff = db.get_all_cold_staff()
@@ -3140,7 +3177,6 @@ def handle_broadcast_message(update: Update, context: CallbackContext):
     message_text = update.message.text
     sender_id = update.effective_user.id
     
-    # Получаем всех пользователей
     user_ids = db.get_all_user_ids()
     
     sent_count = 0
@@ -3194,7 +3230,6 @@ def handle_role_change(update: Update, context: CallbackContext):
             return
         
         if identifier.isdigit():
-            # По ID
             user_id = int(identifier)
             db.set_user_role(user_id, role, update.effective_user.id)
             update.message.reply_text(
@@ -3202,7 +3237,6 @@ def handle_role_change(update: Update, context: CallbackContext):
                 reply_markup=get_owner_panel_keyboard()
             )
         else:
-            # По username
             username = identifier.replace('@', '')
             db.cursor.execute("SELECT user_id FROM users WHERE username = ?", (username,))
             result = db.cursor.fetchone()
@@ -3258,7 +3292,6 @@ def queue_check_job(context: CallbackContext):
         except Exception as e:
             logger.error(f"Failed to send queue check: {e}")
     
-    # Проверка очереди MAX
     db.cursor.execute('''
         SELECT id, user_id, queue_position, phone_number
         FROM max_accounts 
@@ -3297,7 +3330,7 @@ def check_active_numbers(context: CallbackContext):
             now = datetime.now()
             work_duration = int((now - activated).total_seconds())
             
-            if work_duration % 600 == 0:  # Каждые 10 минут
+            if work_duration % 600 == 0:
                 db.add_working_time(number[2], 600, platform='whatsapp')
     
     active_max = db.get_active_max_accounts()
@@ -3335,7 +3368,7 @@ def main():
         entry_points=[CallbackQueryHandler(handle_callback, pattern='^submit_whatsapp$')],
         states={
             WAITING_FOR_NUMBER: [MessageHandler(Filters.text & ~Filters.command, handle_whatsapp_number_input)],
-            WAITING_FOR_TYPE: [CallbackQueryHandler(handle_type_selection, pattern='^(type_code|type_qr|back_to_main)$')]
+            WAITING_FOR_TYPE: [CallbackQueryHandler(handle_type_selection, pattern='^(type_code|type_qr)$')]
         },
         fallbacks=[CommandHandler('cancel', cancel)]
     )
