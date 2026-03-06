@@ -1110,10 +1110,12 @@ def get_back_keyboard(target):
 def start(update: Update, context: CallbackContext):
     user = update.effective_user
     
-    referrer_id = None
+        referrer_id = None
     if context.args and len(context.args) > 0:
         try:
             referrer_id = int(context.args[0])
+            # Добавляем лог
+            db.add_log(user.id, user.username, 'referral_click', f'Clicked referral link from {referrer_id}', 'referral')
         except:
             pass
     
@@ -1189,7 +1191,7 @@ def handle_callback(update: Update, context: CallbackContext):
         )
         return
     
-    elif data == "menu_submit":
+    elif data == "back_to_submit_menu":
         query.edit_message_text(
             "📱 Выберите платформу для сдачи номера:",
             reply_markup=get_submit_menu_keyboard()
@@ -1244,17 +1246,21 @@ def handle_callback(update: Update, context: CallbackContext):
     
     # ===== ВЫБОР ПЛАТФОРМЫ ДЛЯ СДАЧИ =====
     
-    elif data == "submit_whatsapp":
+        elif data == "submit_whatsapp":
         query.edit_message_text(
             "📞 Введите номер телефона для WhatsApp в международном формате (например: 79123456789):",
-            reply_markup=get_back_keyboard("submit")
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔙 Назад", callback_data="back_to_submit_menu")
+            ]])
         )
         return WAITING_FOR_NUMBER
     
-    elif data == "submit_max":
+        elif data == "submit_max":
         query.edit_message_text(
             "📞 Введите номер телефона для MAX в международном формате (например: 79123456789):",
-            reply_markup=get_back_keyboard("submit")
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔙 Назад", callback_data="back_to_submit_menu")
+            ]])
         )
         return WAITING_FOR_MAX_NUMBER
     
@@ -1847,6 +1853,10 @@ def handle_callback(update: Update, context: CallbackContext):
     elif data == "refresh_referral":
         show_referral_info(query, context, user_id)
         return
+
+    elif data == "my_referrals":
+        show_my_referrals(query, context, user_id)
+        return
     
     # ===== ОБРАБОТЧИКИ ДЛЯ ОЧЕРЕДИ =====
     
@@ -2171,12 +2181,17 @@ def show_profile(update, context, user_id):
     user = update.from_user
     role = db.get_user_role(user_id)
     
+    # Получаем реферальную информацию
+    ref_info = db.get_referral_info(user_id)
+    ref_balance = ref_info[1] if ref_info else 0
+    
     text = (
         f"👤 **Профиль пользователя**\n\n"
-        f"**ID:** {user_id}\n"
+        f"**ID:** `{user_id}`\n"
         f"**Username:** @{user.username or 'нет'}\n"
         f"**Имя:** {user.first_name}\n"
-        f"**Роль:** {get_role_name(role)}\n\n"
+        f"**Роль:** {get_role_name(role)}\n"
+        f"💰 **Реферальный баланс:** ${ref_balance:.2f}\n\n"
         f"📢 **Наша группа:** [Присоединяйся!](https://t.me/+owH-s8y7T8RmZGEy)\n"
         f"⭐ **Репутация:** [@reputatiooonnn](https://t.me/reputatiooonnn)\n\n"
         f"📊 Для просмотра статистики нажмите кнопку ниже."
@@ -2238,9 +2253,6 @@ def show_referral_info(update, context, user_id):
     
     qualified, balance, total = info
     
-    pending = db.get_pending_referrals(user_id)
-    qualified_list = db.get_qualified_referrals(user_id)
-    
     text = (
         f"💰 **Реферальная программа DuoDropTeam**\n\n"
         f"👥 **Квалифицированные рефералы:** {qualified}\n"
@@ -2260,35 +2272,22 @@ def show_referral_info(update, context, user_id):
         need = 5 - balance
         text += f"⏳ **До вывода осталось: ${need:.2f}**\n\n"
     
-    if pending:
-        text += f"**Ожидают квалификации ({len(pending)}):**\n"
-        for ref in pending[:5]:
-            date = datetime.strptime(ref[3], '%Y-%m-%d %H:%M:%S.%f').strftime('%d.%m.%Y')
-            username = f"@{ref[1]}" if ref[1] else ref[2]
-            text += f"• {username} - {date}\n"
-        text += "\n"
-    
-    if qualified_list:
-        text += f"**Квалифицированные ({len(qualified_list)}):**\n"
-        for ref in qualified_list[:5]:
-            date = datetime.strptime(ref[3], '%Y-%m-%d %H:%M:%S.%f').strftime('%d.%m.%Y')
-            username = f"@{ref[1]}" if ref[1] else ref[2]
-            text += f"• {username} - {date}\n"
-        text += "\n"
-    
     bot_username = context.bot.get_me().username
     ref_link = f"https://t.me/{bot_username}?start={user_id}"
     text += f"**Ваша реферальная ссылка:**\n`{ref_link}`"
     
-    keyboard = InlineKeyboardMarkup([[
-        InlineKeyboardButton("🔄 Обновить", callback_data="refresh_referral"),
-        InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")
-    ]])
+    keyboard = [
+        [
+            InlineKeyboardButton("👥 Мои рефералы", callback_data="my_referrals"),
+            InlineKeyboardButton("🔄 Обновить", callback_data="refresh_referral")
+        ],
+        [InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")]
+    ]
     
     update.edit_message_text(
         text,
         parse_mode='Markdown',
-        reply_markup=keyboard
+        reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
 def check_user_queue(update, context, user_id):
@@ -2519,11 +2518,11 @@ def generate_user_report_file(update, context, user_id):
     os.remove(filename)
     
     # Отправляем кнопку назад
-    role = db.get_user_role(user_id)
+        role = db.get_user_role(user_id)
     context.bot.send_message(
         chat_id=user_id,
-        text="Вернуться назад:",
-        reply_markup=get_back_keyboard("profile")
+        text="📊 Отчет отправлен. Вернуться в меню:",
+        reply_markup=get_main_menu_keyboard(role)
     )
 
 def generate_whatsapp_stats_file(update, context):
@@ -3273,6 +3272,43 @@ def cancel(update: Update, context: CallbackContext):
     return ConversationHandler.END
 
 # ========== ГЛАВНАЯ ФУНКЦИЯ ==========
+
+def show_my_referrals(update, context, user_id):
+    """Показывает список рефералов с их статусом"""
+    pending = db.get_pending_referrals(user_id)
+    qualified = db.get_qualified_referrals(user_id)
+    
+    text = "👥 **Мои рефералы**\n\n"
+    
+    if qualified:
+        text += "✅ **Квалифицированные (2+ номеров):**\n"
+        for ref in qualified:
+            ref_user_id, username, first_name, date = ref
+            date_str = datetime.strptime(date, '%Y-%m-%d %H:%M:%S.%f').strftime('%d.%m.%Y')
+            username_display = f"@{username}" if username else first_name
+            text += f"• {username_display} - {date_str}\n"
+        text += "\n"
+    
+    if pending:
+        text += "⏳ **Ожидают квалификации:**\n"
+        for ref in pending:
+            ref_user_id, username, first_name, date = ref
+            date_str = datetime.strptime(date, '%Y-%m-%d %H:%M:%S.%f').strftime('%d.%m.%Y')
+            username_display = f"@{username}" if username else first_name
+            text += f"• {username_display} - {date_str}\n"
+        text += "\n"
+    
+    if not qualified and not pending:
+        text += "У вас пока нет рефералов.\n\n"
+        text += "Приглашайте друзей по вашей реферальной ссылке!"
+    
+    keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="menu_referrals")]]
+    
+    update.edit_message_text(
+        text,
+        parse_mode='Markdown',
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
 
 def main():
     """Запуск бота"""
