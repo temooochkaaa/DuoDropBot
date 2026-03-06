@@ -1,6 +1,9 @@
 import logging
 import sqlite3
 from datetime import datetime, timedelta
+from typing import Dict, List, Optional, Tuple
+import os
+import tempfile
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackQueryHandler, ConversationHandler, CallbackContext
 import config
@@ -216,6 +219,12 @@ class Database:
         self.cursor.execute('SELECT role FROM users WHERE user_id = ?', (user_id,))
         result = self.cursor.fetchone()
         return result[0] if result else 'user'
+    
+    def set_user_role(self, user_id, role, changed_by):
+        old_role = self.get_user_role(user_id)
+        self.cursor.execute('UPDATE users SET role = ? WHERE user_id = ?', (role, user_id))
+        self.conn.commit()
+        self.add_log(changed_by, None, 'role_changed', f'User {user_id}: {old_role} -> {role}', 'admin')
     
     def add_log(self, user_id, username, action, details, platform='system'):
         try:
@@ -564,12 +573,6 @@ class Database:
         
         return False
     
-    def set_user_role(self, user_id, role, changed_by):
-        old_role = self.get_user_role(user_id)
-        self.cursor.execute('UPDATE users SET role = ? WHERE user_id = ?', (role, user_id))
-        self.conn.commit()
-        self.add_log(changed_by, None, 'role_changed', f'User {user_id}: {old_role} -> {role}', 'admin')
-    
     def get_user_numbers(self, user_id):
         self.cursor.execute('''
             SELECT * FROM numbers 
@@ -786,6 +789,7 @@ class Database:
         self.cursor.execute('SELECT user_id, username, first_name, role FROM users')
         return self.cursor.fetchall()
 
+# Инициализация базы данных
 db = Database()
 
 # ========== ТЕКСТЫ ==========
@@ -858,132 +862,97 @@ def get_role_name(role):
     }
     return roles.get(role, 'Пользователь')
 
-def get_user_keyboard():
+# ========== ФУНКЦИИ ДЛЯ КЛАВИАТУР ==========
+
+def get_back_button():
+    """Кнопка назад для всех меню"""
+    return [KeyboardButton("🔙 Назад")]
+
+def get_user_panel_keyboard():
+    """Панель пользователя (доступна всем)"""
     keyboard = [
         [KeyboardButton("📱 WhatsApp"), KeyboardButton("📲 MAX")],
         [KeyboardButton("📊 Моя статистика"), KeyboardButton("👤 Профиль")],
         [KeyboardButton("💰 Рефералы"), KeyboardButton("🔰 Поддержка")],
         [KeyboardButton("🔄 Проверить очередь")]
     ]
-    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    return keyboard
 
-def get_cold_keyboard():
-    keyboard = [
-        [KeyboardButton("🆕 Запросить WhatsApp"), KeyboardButton("🆕 Запросить MAX")],
-        [KeyboardButton("📋 WhatsApp очередь"), KeyboardButton("📋 MAX очередь")],
-        [KeyboardButton("📋 Мои WhatsApp"), KeyboardButton("📋 Мои MAX")],
-        [KeyboardButton("📊 Моя статистика"), KeyboardButton("👤 Профиль")],
-        [KeyboardButton("💰 Рефералы"), KeyboardButton("🔰 Поддержка")]
-    ]
-    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-
-def get_helper_keyboard():
-    keyboard = [
-        [KeyboardButton("📊 WhatsApp статистика"), KeyboardButton("📊 MAX статистика")],
-        [KeyboardButton("📋 Все WhatsApp"), KeyboardButton("📋 Все MAX")],
-        [KeyboardButton("🗑 Удалить из очереди")],
-        [KeyboardButton("📱 WhatsApp"), KeyboardButton("📲 MAX")],
-        [KeyboardButton("📊 Моя статистика"), KeyboardButton("👤 Профиль")],
-        [KeyboardButton("💰 Рефералы"), KeyboardButton("🔰 Поддержка")],
-        [KeyboardButton("🔄 Проверить очередь")]
-    ]
-    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-
-def get_owner_keyboard():
+def get_owner_panel_keyboard():
+    """Панель владельца"""
     keyboard = [
         [KeyboardButton("📊 WhatsApp статистика"), KeyboardButton("📊 MAX статистика")],
         [KeyboardButton("📋 Все WhatsApp"), KeyboardButton("📋 Все MAX")],
         [KeyboardButton("👥 Управление ролями"), KeyboardButton("⚖️ Штрафы")],
-        [KeyboardButton("📋 Логи"), KeyboardButton("🗑 Удалить из очереди")],
-        [KeyboardButton("📱 WhatsApp"), KeyboardButton("📲 MAX")],
-        [KeyboardButton("📊 Моя статистика"), KeyboardButton("👤 Профиль")],
-        [KeyboardButton("💰 Рефералы"), KeyboardButton("🔰 Поддержка")],
-        [KeyboardButton("🔄 Проверить очередь")]
+        [KeyboardButton("📋 Логи"), KeyboardButton("🗑 Удалить из очереди")]
     ]
+    return keyboard
+
+def get_helper_panel_keyboard():
+    """Панель помощника"""
+    keyboard = [
+        [KeyboardButton("📊 WhatsApp статистика"), KeyboardButton("📊 MAX статистика")],
+        [KeyboardButton("📋 Все WhatsApp"), KeyboardButton("📋 Все MAX")],
+        [KeyboardButton("🗑 Удалить из очереди")]
+    ]
+    return keyboard
+
+def get_cold_panel_keyboard():
+    """Панель холодки"""
+    keyboard = [
+        [KeyboardButton("🆕 Запросить WhatsApp"), KeyboardButton("🆕 Запросить MAX")],
+        [KeyboardButton("📋 WhatsApp очередь"), KeyboardButton("📋 MAX очередь")],
+        [KeyboardButton("📋 Мои WhatsApp"), KeyboardButton("📋 Мои MAX")]
+    ]
+    return keyboard
+
+def get_main_keyboard(role):
+    """Главная клавиатура в зависимости от роли"""
+    keyboard = []
+    
+    # Панель пользователя (для всех)
+    keyboard.extend(get_user_panel_keyboard())
+    
+    # Разделитель
+    keyboard.append(["➖➖➖➖➖➖➖➖"])
+    
+    # Панель в зависимости от роли
+    if role == 'owner':
+        keyboard.extend(get_owner_panel_keyboard())
+    elif role == 'helper':
+        keyboard.extend(get_helper_panel_keyboard())
+    elif role == 'cold':
+        keyboard.extend(get_cold_panel_keyboard())
+    
+    # Кнопка назад
+    keyboard.append(get_back_button())
+    
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
-def get_type_selection_keyboard():
-    keyboard = [
-        [
-            InlineKeyboardButton("📝 Обычный код", callback_data="type_code"),
-            InlineKeyboardButton("📷 QR код", callback_data="type_qr")
-        ]
-    ]
-    return InlineKeyboardMarkup(keyboard)
+# ========== ФУНКЦИИ ДЛЯ СОЗДАНИЯ ФАЙЛОВ СТАТИСТИКИ ==========
 
-def get_whatsapp_action_keyboard(number_id, request_type, taken_by=None):
-    buttons = []
+def create_stats_file(filename, content):
+    """Создает временный файл со статистикой"""
+    with open(filename, 'w', encoding='utf-8') as f:
+        f.write(content)
+    return filename
+
+def format_time(seconds):
+    """Форматирует время в дни/часы/минуты"""
+    hours = seconds // 3600
+    minutes = (seconds % 3600) // 60
+    days = hours // 24
+    hours = hours % 24
     
-    if taken_by is None:
-        if request_type == 'qr':
-            buttons.append(InlineKeyboardButton("📷 Взять и отправить QR", callback_data=f"wa_take_qr_{number_id}"))
-        else:
-            buttons.append(InlineKeyboardButton("📝 Взять и отправить код", callback_data=f"wa_take_code_{number_id}"))
+    if days > 0:
+        return f"{days}д {hours}ч {minutes}мин"
     else:
-        if request_type == 'qr':
-            buttons.append(InlineKeyboardButton("📷 Отправить QR", callback_data=f"wa_send_qr_{number_id}"))
-        else:
-            buttons.append(InlineKeyboardButton("📝 Отправить код", callback_data=f"wa_send_code_{number_id}"))
-    
-    return InlineKeyboardMarkup([buttons])
-
-def get_max_action_keyboard(account_id, taken_by=None, status=None):
-    buttons = []
-    
-    if taken_by is None:
-        buttons.append(InlineKeyboardButton("📲 Взять аккаунт", callback_data=f"max_take_{account_id}"))
-    else:
-        if status == 'in_progress':
-            buttons.append(InlineKeyboardButton("🔑 Запросить код", callback_data=f"max_request_code_{account_id}"))
-        if status in ['in_progress', 'code_received']:
-            buttons.append(InlineKeyboardButton("📝 Запросить доп инфо", callback_data=f"max_request_extra_{account_id}"))
-        buttons.append(InlineKeyboardButton("✅ Активирован", callback_data=f"max_activated_{account_id}"))
-        buttons.append(InlineKeyboardButton("❌ Не встал", callback_data=f"max_failed_{account_id}"))
-        if status == 'activated':
-            buttons.append(InlineKeyboardButton("💥 Слетел", callback_data=f"max_crashed_{account_id}"))
-    
-    keyboard = []
-    for i in range(0, len(buttons), 2):
-        keyboard.append(buttons[i:i+2])
-    
-    return InlineKeyboardMarkup(keyboard)
-
-def get_code_action_keyboard(number_id):
-    keyboard = [
-        [
-            InlineKeyboardButton("✅ Номер встал", callback_data=f"activated_{number_id}"),
-            InlineKeyboardButton("❌ Номер не встал", callback_data=f"failed_{number_id}")
-        ],
-        [InlineKeyboardButton("💥 Номер слетел", callback_data=f"crashed_{number_id}")]
-    ]
-    return InlineKeyboardMarkup(keyboard)
-
-def get_queue_check_keyboard(item_id, platform='whatsapp'):
-    data_prefix = "wa_queue" if platform == 'whatsapp' else "max_queue"
-    keyboard = [
-        [
-            InlineKeyboardButton("✅ Да, оставить", callback_data=f"{data_prefix}_keep_{item_id}"),
-            InlineKeyboardButton("❌ Нет, убрать", callback_data=f"{data_prefix}_remove_{item_id}")
-        ]
-    ]
-    return InlineKeyboardMarkup(keyboard)
-
-def get_retry_keyboard(number_id):
-    keyboard = [
-        [
-            InlineKeyboardButton("🔄 Повторить с этим номером", callback_data=f"retry_{number_id}"),
-            InlineKeyboardButton("❌ Отменить номер", callback_data=f"cancel_number_{number_id}")
-        ]
-    ]
-    return InlineKeyboardMarkup(keyboard)
+        return f"{hours}ч {minutes}мин"
 
 # ========== ОСНОВНЫЕ ОБРАБОТЧИКИ ==========
+
 def start(update: Update, context: CallbackContext):
     user = update.effective_user
-    # ВРЕМЕННЫЙ КОД ДЛЯ НАЗНАЧЕНИЯ ВЛАДЕЛЬЦА
-    if user.id == 7787440009:  # ВСТАВЬ СВОЙ ID СЮДА!
-        db.cursor.execute("UPDATE users SET role = 'owner' WHERE user_id = ?", (user.id,))
-        db.conn.commit()
     
     referrer_id = None
     if context.args and len(context.args) > 0:
@@ -1008,22 +977,13 @@ def start(update: Update, context: CallbackContext):
     
     role = db.get_user_role(user.id)
     
-    welcome_with_buttons = WELCOME_TEXT + f"\n\n👋 Привет, {user.first_name}! Твой статус: {get_role_name(role)}"
-    
-    if role == 'owner':
-        keyboard = get_owner_keyboard()
-    elif role == 'helper':
-        keyboard = get_helper_keyboard()
-    elif role == 'cold':
-        keyboard = get_cold_keyboard()
-    else:
-        keyboard = get_user_keyboard()
+    welcome_text = WELCOME_TEXT + f"\n\n👋 Привет, {user.first_name}! Твой статус: {get_role_name(role)}"
     
     update.message.reply_text(
-        welcome_with_buttons,
+        welcome_text,
         parse_mode='Markdown',
         disable_web_page_preview=True,
-        reply_markup=keyboard
+        reply_markup=get_main_keyboard(role)
     )
     
     db.add_log(user.id, user.username, 'user_start', 'Started bot', 'auth')
@@ -1044,23 +1004,14 @@ def handle_agreement(update: Update, context: CallbackContext):
         )
         
         role = db.get_user_role(user_id)
-        welcome_with_buttons = WELCOME_TEXT + f"\n\n👋 Привет, {query.from_user.first_name}! Твой статус: {get_role_name(role)}"
-        
-        if role == 'owner':
-            keyboard = get_owner_keyboard()
-        elif role == 'helper':
-            keyboard = get_helper_keyboard()
-        elif role == 'cold':
-            keyboard = get_cold_keyboard()
-        else:
-            keyboard = get_user_keyboard()
+        welcome_text = WELCOME_TEXT + f"\n\n👋 Привет, {query.from_user.first_name}! Твой статус: {get_role_name(role)}"
         
         context.bot.send_message(
             chat_id=user_id,
-            text=welcome_with_buttons,
+            text=welcome_text,
             parse_mode='Markdown',
             disable_web_page_preview=True,
-            reply_markup=keyboard
+            reply_markup=get_main_keyboard(role)
         )
     
     return ConversationHandler.END
@@ -1083,7 +1034,16 @@ def handle_message(update: Update, context: CallbackContext):
         )
         return WAITING_FOR_AGREEMENT
     
-    if text == "🔰 Поддержка":
+    # ===== ОБЩИЕ КНОПКИ ДЛЯ ВСЕХ =====
+    
+    if text == "🔙 Назад":
+        update.message.reply_text(
+            "🔙 Вы вернулись в главное меню",
+            reply_markup=get_main_keyboard(role)
+        )
+        return
+    
+    elif text == "🔰 Поддержка":
         update.message.reply_text(SUPPORT_TEXT, parse_mode='Markdown')
         db.add_log(user_id, username, 'support_click', 'Clicked support button', 'navigation')
     
@@ -1094,7 +1054,7 @@ def handle_message(update: Update, context: CallbackContext):
         show_profile(update, context, user_id)
     
     elif text == "📊 Моя статистика":
-        generate_user_report(update, context, user_id)
+        generate_user_report_file(update, context, user_id)
     
     elif text == "🔄 Проверить очередь":
         check_user_queue(update, context, user_id)
@@ -1110,6 +1070,109 @@ def handle_message(update: Update, context: CallbackContext):
             "📞 Введите номер телефона для MAX в международном формате (например: 79123456789):"
         )
         return WAITING_FOR_MAX_NUMBER
+    
+    # ===== ОБРАБОТКА КОМАНД НАЗНАЧЕНИЯ РОЛЕЙ (ДЛЯ ВЛАДЕЛЬЦА) =====
+    
+    elif role == 'owner' and text.startswith(('owner ', 'helper ', 'cold ', 'user ')):
+        try:
+            parts = text.split()
+            if len(parts) != 2:
+                update.message.reply_text("❌ Используйте: роль ID или роль @username\nПример: cold 123456789")
+                return
+            
+            new_role = parts[0].lower()
+            identifier = parts[1]
+            
+            if new_role not in ['owner', 'helper', 'cold', 'user']:
+                update.message.reply_text("❌ Неверная роль. Доступны: owner, helper, cold, user")
+                return
+            
+            # Поиск пользователя
+            if identifier.isdigit():
+                user_id_to_change = int(identifier)
+                db.set_user_role(user_id_to_change, new_role, user_id)
+                update.message.reply_text(f"✅ Роль пользователя {user_id_to_change} изменена на {new_role}!")
+            else:
+                username_to_change = identifier.replace('@', '')
+                db.cursor.execute("SELECT user_id FROM users WHERE username = ?", (username_to_change,))
+                result = db.cursor.fetchone()
+                if result:
+                    user_id_to_change = result[0]
+                    db.set_user_role(user_id_to_change, new_role, user_id)
+                    update.message.reply_text(f"✅ Роль пользователя @{username_to_change} изменена на {new_role}!")
+                else:
+                    update.message.reply_text(f"❌ Пользователь @{username_to_change} не найден в базе данных")
+            
+            # Обновляем клавиатуру у пользователя, если он сейчас в боте (можно отправить уведомление)
+            try:
+                context.bot.send_message(
+                    chat_id=user_id_to_change,
+                    text=f"🔄 Ваша роль изменена на {get_role_name(new_role)}!",
+                    reply_markup=get_main_keyboard(new_role)
+                )
+            except:
+                pass
+            
+        except Exception as e:
+            update.message.reply_text(f"❌ Ошибка: {e}")
+        return
+    
+    # ===== КНОПКИ ДЛЯ ВЛАДЕЛЬЦА =====
+    
+    elif role == 'owner':
+        if text == "📊 WhatsApp статистика":
+            generate_whatsapp_stats_file(update, context)
+        
+        elif text == "📊 MAX статистика":
+            generate_max_stats_file(update, context)
+        
+        elif text == "📋 Все WhatsApp":
+            show_all_whatsapp_queue(update, context)
+        
+        elif text == "📋 Все MAX":
+            show_all_max_queue(update, context)
+        
+        elif text == "👥 Управление ролями":
+            show_role_management(update, context)
+        
+        elif text == "📋 Логи":
+            show_logs(update, context)
+        
+        elif text == "⚖️ Штрафы":
+            show_fines_menu(update, context)
+        
+        elif text == "🗑 Удалить из очереди":
+            update.message.reply_text(
+                "Введите ID номера и платформу (whatsapp/max) для удаления из очереди.\n"
+                "Формат: ID платформа\n"
+                "Пример: 123 whatsapp"
+            )
+            return WAITING_FOR_QUEUE_REMOVE
+    
+    # ===== КНОПКИ ДЛЯ ПОМОЩНИКА =====
+    
+    elif role == 'helper':
+        if text == "📊 WhatsApp статистика":
+            generate_whatsapp_stats_file(update, context)
+        
+        elif text == "📊 MAX статистика":
+            generate_max_stats_file(update, context)
+        
+        elif text == "📋 Все WhatsApp":
+            show_all_whatsapp_queue(update, context)
+        
+        elif text == "📋 Все MAX":
+            show_all_max_queue(update, context)
+        
+        elif text == "🗑 Удалить из очереди":
+            update.message.reply_text(
+                "Введите ID номера и платформу (whatsapp/max) для удаления из очереди.\n"
+                "Формат: ID платформа\n"
+                "Пример: 123 whatsapp"
+            )
+            return WAITING_FOR_QUEUE_REMOVE
+    
+    # ===== КНОПКИ ДЛЯ ХОЛОДКИ =====
     
     elif role == 'cold':
         if text == "🆕 Запросить WhatsApp":
@@ -1149,105 +1212,192 @@ def handle_message(update: Update, context: CallbackContext):
         
         elif text == "📋 Мои MAX":
             show_my_max(update, context, user_id)
+
+# ========== ФУНКЦИИ ДЛЯ СОЗДАНИЯ ФАЙЛОВ СО СТАТИСТИКОЙ ==========
+
+def generate_user_report_file(update: Update, context: CallbackContext, user_id):
+    """Создает файл с отчетом пользователя"""
+    wa_numbers = db.get_user_numbers(user_id)
+    max_accounts = db.get_user_max_accounts(user_id)
     
-    elif role == 'helper':
-        if text == "📊 WhatsApp статистика":
-            generate_whatsapp_daily_stats(update, context)
-        
-        elif text == "📊 MAX статистика":
-            generate_max_daily_stats(update, context)
-        
-        elif text == "📋 Все WhatsApp":
-            show_all_whatsapp_queue(update, context)
-        
-        elif text == "📋 Все MAX":
-            show_all_max_queue(update, context)
-        
-        elif text == "🗑 Удалить из очереди":
-            update.message.reply_text(
-                "Введите ID номера и платформу (whatsapp/max) для удаления из очереди.\n"
-                "Формат: ID платформа\n"
-                "Пример: 123 whatsapp"
-            )
-            return WAITING_FOR_QUEUE_REMOVE
+    if not wa_numbers and not max_accounts:
+        update.message.reply_text("📭 У вас пока нет аккаунтов.")
+        return
     
-    elif role == 'owner':
-# ДИАГНОСТИКА
-        print(f"👑 Owner command received: {text}")
+    filename = f"user_report_{user_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+    content = f"ОТЧЕТ ПО АККАУНТАМ ПОЛЬЗОВАТЕЛЯ {user_id}\n"
+    content += f"Сгенерировано: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+    content += "=" * 50 + "\n\n"
+    
+    if wa_numbers:
+        content += "📱 WHATSAPP:\n"
+        content += "-" * 30 + "\n"
+        for num in wa_numbers:
+            status_emoji = {
+                'pending': '⏳ Ожидание',
+                'in_progress': '🔄 В работе',
+                'code_sent': '🔑 Код отправлен',
+                'code_entered': '✅ Код введен',
+                'activated': '✅ Активен',
+                'crashed': '💥 Слетел',
+                'failed': '❌ Не встал',
+                'cancelled': '🚫 Отменен'
+            }.get(num[3], num[3])
+            
+            content += f"Номер: {num[1]}\n"
+            content += f"Статус: {status_emoji}\n"
+            if num[7]:
+                activated = datetime.strptime(num[7], '%Y-%m-%d %H:%M:%S.%f').strftime('%Y-%m-%d %H:%M')
+                content += f"Встал: {activated}\n"
+            if num[8]:
+                crashed = datetime.strptime(num[8], '%Y-%m-%d %H:%M:%S.%f').strftime('%Y-%m-%d %H:%M')
+                content += f"Слетел: {crashed}\n"
+            if num[9]:
+                content += f"Простоял: {format_time(num[9])}\n"
+            content += "-" * 20 + "\n"
+        content += "\n"
+    
+    if max_accounts:
+        content += "📲 MAX:\n"
+        content += "-" * 30 + "\n"
+        for acc in max_accounts:
+            status_emoji = {
+                'pending': '⏳ Ожидание',
+                'waiting_code': '🔑 Ожидает код',
+                'code_received': '✅ Код получен',
+                'in_progress': '🔄 В работе',
+                'activated': '✅ Активен',
+                'crashed': '💥 Слетел',
+                'failed': '❌ Не встал',
+                'cancelled': '🚫 Отменен'
+            }.get(acc[3], acc[3])
+            
+            content += f"Номер: {acc[1]}\n"
+            content += f"Статус: {status_emoji}\n"
+            if acc[7]:
+                activated = datetime.strptime(acc[7], '%Y-%m-%d %H:%M:%S.%f').strftime('%Y-%m-%d %H:%M')
+                content += f"Активирован: {activated}\n"
+            if acc[8]:
+                crashed = datetime.strptime(acc[8], '%Y-%m-%d %H:%M:%S.%f').strftime('%Y-%m-%d %H:%M')
+                content += f"Слетел: {crashed}\n"
+            if acc[9]:
+                content += f"Проработал: {format_time(acc[9])}\n"
+            content += "-" * 20 + "\n"
+    
+    create_stats_file(filename, content)
+    
+    with open(filename, 'rb') as f:
+        update.message.reply_document(
+            document=f,
+            filename=filename,
+            caption="📊 Ваш отчет по аккаунтам"
+        )
+    
+    os.remove(filename)
+
+def generate_whatsapp_stats_file(update: Update, context: CallbackContext):
+    """Создает файл со статистикой WhatsApp за сегодня"""
+    today = datetime.now().date()
+    stats = db.get_daily_stats(today, 'whatsapp')
+    
+    if not any(row[3] for row in stats):  # проверяем, есть ли номера
+        update.message.reply_text("📊 За сегодня нет данных по WhatsApp.")
+        return
+    
+    filename = f"whatsapp_stats_{today}.txt"
+    content = f"СТАТИСТИКА WHATSAPP ЗА {today}\n"
+    content += "=" * 50 + "\n\n"
+    
+    current_user = None
+    for row in stats:
+        user_id, username, first_name, num_id, phone, status, activated, crashed, work_time = row
         
-        # Проверяем, не является ли сообщение командой назначения роли
-        if text.startswith(('owner ', 'helper ', 'cold ', 'user ')):
-            print(f"📝 Role assignment detected: {text}")
-            try:
-                parts = text.split()
-                if len(parts) != 2:
-                    print("❌ Wrong format - not 2 parts")
-                    update.message.reply_text("❌ Используйте: роль ID\nПример: cold 123456789")
-                    return
-                
-                new_role = parts[0].lower()
-                identifier = parts[1]
-                
-                print(f"🎭 Role: {new_role}, Identifier: {identifier}")
-                
-                if new_role not in ['owner', 'helper', 'cold', 'user']:
-                    print(f"❌ Invalid role: {new_role}")
-                    update.message.reply_text("❌ Неверная роль. Доступны: owner, helper, cold, user")
-                    return
-                
-                # Поиск пользователя
-                if identifier.isdigit():
-                    print(f"🔍 Searching by ID: {identifier}")
-                    user_id = int(identifier)
-                    db.set_user_role(user_id, new_role, update.effective_user.id)
-                    update.message.reply_text(f"✅ Роль пользователя {user_id} изменена на {new_role}!")
-                    print(f"✅ Role changed for ID {user_id}")
-                else:
-                    username = identifier.replace('@', '')
-                    print(f"🔍 Searching by username: {username}")
-                    db.cursor.execute("SELECT user_id FROM users WHERE username = ?", (username,))
-                    result = db.cursor.fetchone()
-                    if result:
-                        user_id = result[0]
-                        db.set_user_role(user_id, new_role, update.effective_user.id)
-                        update.message.reply_text(f"✅ Роль пользователя @{username} изменена на {new_role}!")
-                        print(f"✅ Role changed for @{username}")
-                    else:
-                        print(f"❌ User @{username} not found in database")
-                        update.message.reply_text(f"❌ Пользователь @{username} не найден")
-                        
-            except Exception as e:
-                print(f"🔥 EXCEPTION: {e}")
-                update.message.reply_text(f"❌ Ошибка: {e}")
-            return
-        if text == "📊 WhatsApp статистика":
-            generate_whatsapp_daily_stats(update, context)
+        if current_user != user_id:
+            current_user = user_id
+            content += f"\n👤 ПОЛЬЗОВАТЕЛЬ: @{username or first_name} (ID: {user_id})\n"
+            content += "-" * 40 + "\n"
         
-        elif text == "📊 MAX статистика":
-            generate_max_daily_stats(update, context)
+        if num_id:
+            status_emoji = {
+                'activated': '✅ Активирован',
+                'crashed': '💥 Слетел',
+                'failed': '❌ Не встал',
+                'cancelled': '🚫 Отменен'
+            }.get(status, '⏳ В обработке')
+            
+            time_str = format_time(work_time) if work_time else "-"
+            activated_str = datetime.strptime(activated, '%Y-%m-%d %H:%M:%S.%f').strftime('%H:%M') if activated else '-'
+            crashed_str = datetime.strptime(crashed, '%Y-%m-%d %H:%M:%S.%f').strftime('%H:%M') if crashed else '-'
+            
+            content += f"\n📞 Номер: {phone}\n"
+            content += f"   Статус: {status_emoji}\n"
+            content += f"   Встал: {activated_str}\n"
+            content += f"   Слетел: {crashed_str}\n"
+            content += f"   Простоял: {time_str}\n"
+    
+    create_stats_file(filename, content)
+    
+    with open(filename, 'rb') as f:
+        update.message.reply_document(
+            document=f,
+            filename=filename,
+            caption=f"📊 Статистика WhatsApp за {today}"
+        )
+    
+    os.remove(filename)
+
+def generate_max_stats_file(update: Update, context: CallbackContext):
+    """Создает файл со статистикой MAX за сегодня"""
+    today = datetime.now().date()
+    stats = db.get_daily_stats(today, 'max')
+    
+    if not any(row[3] for row in stats):  # проверяем, есть ли аккаунты
+        update.message.reply_text("📊 За сегодня нет данных по MAX.")
+        return
+    
+    filename = f"max_stats_{today}.txt"
+    content = f"СТАТИСТИКА MAX ЗА {today}\n"
+    content += "=" * 50 + "\n\n"
+    
+    current_user = None
+    for row in stats:
+        user_id, username, first_name, acc_id, phone, status, activated, crashed, work_time = row
         
-        elif text == "📋 Все WhatsApp":
-            show_all_whatsapp_queue(update, context)
+        if current_user != user_id:
+            current_user = user_id
+            content += f"\n👤 ПОЛЬЗОВАТЕЛЬ: @{username or first_name} (ID: {user_id})\n"
+            content += "-" * 40 + "\n"
         
-        elif text == "📋 Все MAX":
-            show_all_max_queue(update, context)
-        
-        elif text == "👥 Управление ролями":
-            show_role_management(update, context)
-        
-        elif text == "📋 Логи":
-            show_logs(update, context)
-        
-        elif text == "⚖️ Штрафы":
-            show_fines_menu(update, context)
-        
-        elif text == "🗑 Удалить из очереди":
-            update.message.reply_text(
-                "Введите ID номера и платформу (whatsapp/max) для удаления из очереди.\n"
-                "Формат: ID платформа\n"
-                "Пример: 123 whatsapp"
-            )
-            return WAITING_FOR_QUEUE_REMOVE
+        if acc_id:
+            status_emoji = {
+                'activated': '✅ Активирован',
+                'crashed': '💥 Слетел',
+                'failed': '❌ Не встал',
+                'cancelled': '🚫 Отменен'
+            }.get(status, '⏳ В обработке')
+            
+            time_str = format_time(work_time) if work_time else "-"
+            activated_str = datetime.strptime(activated, '%Y-%m-%d %H:%M:%S.%f').strftime('%H:%M') if activated else '-'
+            crashed_str = datetime.strptime(crashed, '%Y-%m-%d %H:%M:%S.%f').strftime('%H:%M') if crashed else '-'
+            
+            content += f"\n📞 Номер: {phone}\n"
+            content += f"   Статус: {status_emoji}\n"
+            content += f"   Активирован: {activated_str}\n"
+            content += f"   Слетел: {crashed_str}\n"
+            content += f"   Проработал: {time_str}\n"
+    
+    create_stats_file(filename, content)
+    
+    with open(filename, 'rb') as f:
+        update.message.reply_document(
+            document=f,
+            filename=filename,
+            caption=f"📊 Статистика MAX за {today}"
+        )
+    
+    os.remove(filename)
+
+# ========== ОСТАЛЬНЫЕ ФУНКЦИИ (сокращенно, основные моменты) ==========
 
 def handle_whatsapp_number_input(update: Update, context: CallbackContext):
     phone_number = update.message.text.strip()
@@ -1256,16 +1406,22 @@ def handle_whatsapp_number_input(update: Update, context: CallbackContext):
     if not phone_number.isdigit() or len(phone_number) < 10:
         update.message.reply_text(
             "❌ Неверный формат номера. Попробуйте снова:",
-            reply_markup=get_user_keyboard()
+            reply_markup=get_main_keyboard(db.get_user_role(user_id))
         )
         return ConversationHandler.END
     
     context.user_data['temp_phone'] = phone_number
     context.user_data['platform'] = 'whatsapp'
     
+    keyboard = [
+        [
+            InlineKeyboardButton("📝 Обычный код", callback_data="type_code"),
+            InlineKeyboardButton("📷 QR код", callback_data="type_qr")
+        ]
+    ]
     update.message.reply_text(
         "📱 Выберите тип получения кода для WhatsApp:",
-        reply_markup=get_type_selection_keyboard()
+        reply_markup=InlineKeyboardMarkup(keyboard)
     )
     return WAITING_FOR_TYPE
 
@@ -1276,7 +1432,7 @@ def handle_max_number_input(update: Update, context: CallbackContext):
     if not phone_number.isdigit() or len(phone_number) < 10:
         update.message.reply_text(
             "❌ Неверный формат номера. Попробуйте снова:",
-            reply_markup=get_user_keyboard()
+            reply_markup=get_main_keyboard(db.get_user_role(user_id))
         )
         return ConversationHandler.END
     
@@ -1299,7 +1455,7 @@ def handle_max_number_input(update: Update, context: CallbackContext):
     update.message.reply_text(
         f"✅ Номер для MAX принят! Ваша позиция в очереди: {queue_pos}\n"
         f"Ожидайте, когда холодка начнет вход в аккаунт.",
-        reply_markup=get_user_keyboard()
+        reply_markup=get_main_keyboard(db.get_user_role(user_id))
     )
     
     return ConversationHandler.END
@@ -1366,10 +1522,13 @@ def show_whatsapp_queue(update: Update, context: CallbackContext):
             f"⏰ Запрошен: {req[4]}\n"
             f"📋 Тип: {type_text}\n"
         )
-        update.message.reply_text(
-            msg,
-            reply_markup=get_whatsapp_action_keyboard(req[0], req[12], None)
-        )
+        
+        keyboard = InlineKeyboardMarkup([[
+            InlineKeyboardButton("📝 Взять и отправить код", callback_data=f"wa_take_code_{req[0]}"),
+            InlineKeyboardButton("📷 Взять и отправить QR", callback_data=f"wa_take_qr_{req[0]}")
+        ]])
+        
+        update.message.reply_text(msg, reply_markup=keyboard)
 
 def show_max_queue(update: Update, context: CallbackContext):
     pending = db.get_max_pending_requests(include_taken=False)
@@ -1391,10 +1550,12 @@ def show_max_queue(update: Update, context: CallbackContext):
             f"⏰ Запрошен: {req[4]}\n"
             f"📊 Статус: {status_text}\n"
         )
-        update.message.reply_text(
-            msg,
-            reply_markup=get_max_action_keyboard(req[0], None, req[3])
-        )
+        
+        keyboard = InlineKeyboardMarkup([[
+            InlineKeyboardButton("📲 Взять аккаунт", callback_data=f"max_take_{req[0]}")
+        ]])
+        
+        update.message.reply_text(msg, reply_markup=keyboard)
 
 def show_my_whatsapp(update: Update, context: CallbackContext, cold_id):
     db.cursor.execute('''
@@ -1426,7 +1587,15 @@ def show_my_whatsapp(update: Update, context: CallbackContext, cold_id):
             f"👤 Пользователь: @{num[16]}\n"
             f"📊 Статус: {status_text}"
         )
-        update.message.reply_text(msg)
+        
+        if num[3] == 'code_entered':
+            keyboard = InlineKeyboardMarkup([[
+                InlineKeyboardButton("✅ Номер встал", callback_data=f"activated_{num[0]}"),
+                InlineKeyboardButton("❌ Номер не встал", callback_data=f"failed_{num[0]}")
+            ]])
+            update.message.reply_text(msg, reply_markup=keyboard)
+        else:
+            update.message.reply_text(msg)
 
 def show_my_max(update: Update, context: CallbackContext, cold_id):
     db.cursor.execute('''
@@ -1458,7 +1627,25 @@ def show_my_max(update: Update, context: CallbackContext, cold_id):
             f"👤 Пользователь: @{acc[16]}\n"
             f"📊 Статус: {status_text}"
         )
-        update.message.reply_text(msg)
+        
+        keyboard_buttons = []
+        if acc[3] == 'in_progress':
+            keyboard_buttons.append(InlineKeyboardButton("🔑 Запросить код", callback_data=f"max_request_code_{acc[0]}"))
+        if acc[3] in ['in_progress', 'code_received']:
+            keyboard_buttons.append(InlineKeyboardButton("📝 Запросить доп инфо", callback_data=f"max_request_extra_{acc[0]}"))
+            keyboard_buttons.append(InlineKeyboardButton("✅ Активирован", callback_data=f"max_activated_{acc[0]}"))
+            keyboard_buttons.append(InlineKeyboardButton("❌ Не встал", callback_data=f"max_failed_{acc[0]}"))
+        if acc[3] == 'activated':
+            keyboard_buttons.append(InlineKeyboardButton("💥 Слетел", callback_data=f"max_crashed_{acc[0]}"))
+        
+        if keyboard_buttons:
+            # Разбиваем на ряды по 2 кнопки
+            keyboard = []
+            for i in range(0, len(keyboard_buttons), 2):
+                keyboard.append(keyboard_buttons[i:i+2])
+            update.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(keyboard))
+        else:
+            update.message.reply_text(msg)
 
 def show_all_whatsapp_queue(update: Update, context: CallbackContext):
     pending = db.get_whatsapp_pending_requests(include_taken=True)
@@ -1470,7 +1657,7 @@ def show_all_whatsapp_queue(update: Update, context: CallbackContext):
     msg = "📋 **Вся WhatsApp очередь:**\n\n"
     for req in pending:
         type_emoji = "📝" if req[12] == 'code' else "📷"
-        taken_by = "🆓" if req[13] is None else f"👤 {req[13]}"
+        taken_by = "🆓 Свободен" if req[13] is None else f"👤 Занят (ID: {req[13]})"
         msg += f"{type_emoji} #{req[0]} (Поз.{req[14]}) {req[1]} - {taken_by}\n"
     
     if len(msg) > 4000:
@@ -1488,8 +1675,8 @@ def show_all_max_queue(update: Update, context: CallbackContext):
     
     msg = "📋 **Вся MAX очередь:**\n\n"
     for req in pending:
-        taken_by = "🆓" if req[14] is None else f"👤 {req[14]}"
-        status = "⏳" if req[3] == 'pending' else "🔑" if req[3] == 'waiting_code' else "🔄"
+        taken_by = "🆓 Свободен" if req[14] is None else f"👤 Занят (ID: {req[14]})"
+        status = "⏳ В очереди" if req[3] == 'pending' else "🔑 Ожидает код"
         msg += f"{status} #{req[0]} (Поз.{req[13]}) {req[1]} - {taken_by}\n"
     
     if len(msg) > 4000:
@@ -1602,63 +1789,23 @@ def show_role_management(update: Update, context: CallbackContext):
     roles = {'owner': [], 'helper': [], 'cold': [], 'user': []}
     for user in users:
         user_id, username, first_name, role = user
-        roles[role].append(f"@{username or first_name} (ID: {user_id})")
+        display_name = f"@{username}" if username else first_name
+        roles[role].append(f"{display_name} (ID: {user_id})")
     
-    text += "**Владельцы:**\n" + "\n".join(roles['owner'][:5]) + "\n\n"
-    text += "**Помощники:**\n" + "\n".join(roles['helper'][:5]) + "\n\n"
-    text += "**Холодка:**\n" + "\n".join(roles['cold'][:5]) + "\n\n"
-    text += "**Пользователи:** " + str(len(roles['user'])) + "\n\n"
+    text += "**👑 Владельцы:**\n" + "\n".join(roles['owner'][:5]) + "\n\n"
+    text += "**👥 Помощники:**\n" + "\n".join(roles['helper'][:5]) + "\n\n"
+    text += "**❄️ Холодка:**\n" + "\n".join(roles['cold'][:5]) + "\n\n"
+    text += "**👤 Пользователи:** " + str(len(roles['user'])) + "\n\n"
     
-    text += "**Изменить роль:**\n"
-    text += "Формат: `роль user_id`\n"
-    text += "Пример: `helper 123456789`\n"
-    text += "Роли: owner, helper, cold, user"
+    text += "**📝 Изменить роль:**\n"
+    text += "Напишите в чат:\n"
+    text += "• По ID: `роль 123456789`\n"
+    text += "• По username: `роль @username`\n"
+    text += "Пример: `cold 123456789` или `helper @durov`\n\n"
+    text += "Доступные роли: `owner`, `helper`, `cold`, `user`"
     
     update.message.reply_text(text, parse_mode='Markdown')
-    return WAITING_FOR_ROLE_CHANGE
 
-def handle_role_change(update: Update, context: CallbackContext):
-    try:
-        text = update.message.text.strip().split()
-        if len(text) != 2:
-            raise ValueError
-        
-        role = text[0].lower()
-        identifier = text[1].lower()
-        
-        if role not in ['owner', 'helper', 'cold', 'user']:
-            raise ValueError
-        
-        # Проверяем, является ли идентификатор ID или username
-        if identifier.isdigit():
-            # Это ID
-            user_id = int(identifier)
-            db.set_user_role(user_id, role, update.effective_user.id)
-            update.message.reply_text(f"✅ Роль пользователя {user_id} изменена на {role}!")
-        else:
-            # Это username (убираем @ если есть)
-            username = identifier.replace('@', '')
-            
-            # Ищем пользователя по username в базе
-            db.cursor.execute("SELECT user_id FROM users WHERE username = ?", (username,))
-            result = db.cursor.fetchone()
-            
-            if result:
-                user_id = result[0]
-                db.set_user_role(user_id, role, update.effective_user.id)
-                update.message.reply_text(f"✅ Роль пользователя @{username} изменена на {role}!")
-            else:
-                update.message.reply_text(f"❌ Пользователь @{username} не найден в базе данных.")
-        
-    except Exception as e:
-        update.message.reply_text(
-            "❌ Неверный формат. Используйте:\n"
-            "• По ID: роль 123456789\n"
-            "• По username: роль @username\n"
-            "Пример: cold @durov"
-        )
-    
-    return ConversationHandler.END
 def show_logs(update: Update, context: CallbackContext):
     logs = db.get_logs(days=3)
     
@@ -1666,22 +1813,30 @@ def show_logs(update: Update, context: CallbackContext):
         update.message.reply_text("📋 Логов за последние 3 дня нет.")
         return
     
-    text = "📋 **Последние логи (3 дня):**\n\n"
+    filename = f"logs_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+    content = f"ЛОГИ ДЕЙСТВИЙ ЗА ПОСЛЕДНИЕ 3 ДНЯ\n"
+    content += f"Сгенерировано: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+    content += "=" * 50 + "\n\n"
     
-    for log in logs[:30]:
+    for log in logs[:100]:
         log_id, user_id, username, action, details, platform, timestamp = log
-        time_str = datetime.strptime(timestamp, '%Y-%m-%d %H:%M:%S.%f').strftime('%d.%m %H:%M')
-        text += f"[{time_str}] @{username or user_id}: {action} - {details} ({platform})\n"
+        time_str = datetime.strptime(timestamp, '%Y-%m-%d %H:%M:%S.%f').strftime('%d.%m %H:%M:%S')
+        content += f"[{time_str}] @{username or user_id}: {action} - {details} ({platform})\n"
     
-    if len(text) > 4000:
-        for i in range(0, len(text), 4000):
-            update.message.reply_text(text[i:i+4000], parse_mode='Markdown')
-    else:
-        update.message.reply_text(text, parse_mode='Markdown')
+    create_stats_file(filename, content)
+    
+    with open(filename, 'rb') as f:
+        update.message.reply_document(
+            document=f,
+            filename=filename,
+            caption=f"📋 Логи за последние 3 дня"
+        )
+    
+    os.remove(filename)
 
 def check_user_queue(update: Update, context: CallbackContext, user_id):
     db.cursor.execute('''
-        SELECT phone_number, queue_position, platform
+        SELECT phone_number, queue_position, 'whatsapp' as platform
         FROM numbers 
         WHERE user_id = ? AND status = 'pending' AND in_queue = 1
         UNION
@@ -1715,13 +1870,6 @@ def show_profile(update: Update, context: CallbackContext, user_id):
      max_total, max_time, max_crashed, max_today, max_today_time, max_today_crashed,
      referrals, ref_balance) = stats
     
-    def format_time(seconds):
-        hours = seconds // 3600
-        minutes = (seconds % 3600) // 60
-        days = hours // 24
-        hours = hours % 24
-        return f"{days}д {hours}ч {minutes}мин" if days > 0 else f"{hours}ч {minutes}мин"
-    
     text = (
         f"👤 **Профиль пользователя**\n\n"
         f"💰 **Реферальный баланс:** ${ref_balance:.2f}\n"
@@ -1736,166 +1884,6 @@ def show_profile(update: Update, context: CallbackContext, user_id):
     
     update.message.reply_text(text, parse_mode='Markdown')
 
-def generate_user_report(update: Update, context: CallbackContext, user_id):
-    wa_numbers = db.get_user_numbers(user_id)
-    max_accounts = db.get_user_max_accounts(user_id)
-    
-    if not wa_numbers and not max_accounts:
-        update.message.reply_text("📭 У вас пока нет аккаунтов.")
-        return
-    
-    report = "📊 **Отчет по аккаунтам:**\n\n"
-    
-    if wa_numbers:
-        report += "📱 **WhatsApp:**\n"
-        for num in wa_numbers[:10]:
-            status_emoji = {
-                'pending': '⏳', 'in_progress': '🔄', 'code_sent': '🔑',
-                'code_entered': '✅', 'activated': '✅', 'crashed': '💥',
-                'failed': '❌', 'cancelled': '🚫'
-            }.get(num[3], '❓')
-            
-            report += f"{status_emoji} {num[1]}\n"
-            if num[7]:
-                activated = datetime.strptime(num[7], '%Y-%m-%d %H:%M:%S.%f').strftime('%Y-%m-%d %H:%M')
-                report += f"   ✅ Встал: {activated}\n"
-            if num[8]:
-                crashed = datetime.strptime(num[8], '%Y-%m-%d %H:%M:%S.%f').strftime('%Y-%m-%d %H:%M')
-                report += f"   💥 Слетел: {crashed}\n"
-            if num[9]:
-                hours = num[9] // 3600
-                minutes = (num[9] % 3600) // 60
-                days = hours // 24
-                hours = hours % 24
-                time_str = f"{days}д {hours}ч {minutes}мин" if days > 0 else f"{hours}ч {minutes}мин"
-                report += f"   ⏱ Отстоял: {time_str}\n"
-            report += "\n"
-    
-    if max_accounts:
-        report += "📲 **MAX:**\n"
-        for acc in max_accounts[:10]:
-            status_emoji = {
-                'pending': '⏳', 'waiting_code': '🔑', 'code_received': '✅',
-                'in_progress': '🔄', 'activated': '✅', 'crashed': '💥',
-                'failed': '❌', 'cancelled': '🚫'
-            }.get(acc[3], '❓')
-            
-            report += f"{status_emoji} {acc[1]}\n"
-            if acc[7]:
-                activated = datetime.strptime(acc[7], '%Y-%m-%d %H:%M:%S.%f').strftime('%Y-%m-%d %H:%M')
-                report += f"   ✅ Активирован: {activated}\n"
-            if acc[8]:
-                crashed = datetime.strptime(acc[8], '%Y-%m-%d %H:%M:%S.%f').strftime('%Y-%m-%d %H:%M')
-                report += f"   💥 Слетел: {crashed}\n"
-            if acc[9]:
-                hours = acc[9] // 3600
-                minutes = (acc[9] % 3600) // 60
-                days = hours // 24
-                hours = hours % 24
-                time_str = f"{days}д {hours}ч {minutes}мин" if days > 0 else f"{hours}ч {minutes}мин"
-                report += f"   ⏱ Проработал: {time_str}\n"
-            report += "\n"
-    
-    if len(report) > 4000:
-        for i in range(0, len(report), 4000):
-            update.message.reply_text(report[i:i+4000], parse_mode='Markdown')
-    else:
-        update.message.reply_text(report, parse_mode='Markdown')
-
-def generate_whatsapp_daily_stats(update: Update, context: CallbackContext):
-    today = datetime.now().date()
-    stats = db.get_daily_stats(today, 'whatsapp')
-    
-    if not stats:
-        update.message.reply_text("📊 За сегодня нет данных по WhatsApp.")
-        return
-    
-    report = f"📊 **WhatsApp статистика за {today}**\n\n"
-    current_user = None
-    
-    for row in stats:
-        user_id, username, first_name, num_id, phone, status, activated, crashed, work_time = row
-        
-        if current_user != user_id:
-            if current_user is not None:
-                report += "\n"
-            current_user = user_id
-            report += f"👤 @{username or first_name} (ID: {user_id}):\n"
-        
-        if num_id:
-            status_emoji = {
-                'activated': '✅', 'crashed': '💥', 'failed': '❌', 'cancelled': '🚫'
-            }.get(status, '⏳')
-            
-            time_str = ""
-            if work_time:
-                hours = work_time // 3600
-                minutes = (work_time % 3600) // 60
-                days = hours // 24
-                hours = hours % 24
-                time_str = f"{days}д {hours}ч {minutes}мин" if days > 0 else f"{hours}ч {minutes}мин"
-            
-            activated_str = datetime.strptime(activated, '%Y-%m-%d %H:%M:%S.%f').strftime('%H:%M') if activated else '-'
-            crashed_str = datetime.strptime(crashed, '%Y-%m-%d %H:%M:%S.%f').strftime('%H:%M') if crashed else '-'
-            
-            report += f"   {status_emoji} {phone}\n"
-            report += f"      ✅ Встал: {activated_str}\n"
-            report += f"      💥 Слетел: {crashed_str}\n"
-            report += f"      ⏱ Простоял: {time_str}\n"
-    
-    if len(report) > 4000:
-        for i in range(0, len(report), 4000):
-            update.message.reply_text(report[i:i+4000], parse_mode='Markdown')
-    else:
-        update.message.reply_text(report, parse_mode='Markdown')
-
-def generate_max_daily_stats(update: Update, context: CallbackContext):
-    today = datetime.now().date()
-    stats = db.get_daily_stats(today, 'max')
-    
-    if not stats:
-        update.message.reply_text("📊 За сегодня нет данных по MAX.")
-        return
-    
-    report = f"📊 **MAX статистика за {today}**\n\n"
-    current_user = None
-    
-    for row in stats:
-        user_id, username, first_name, acc_id, phone, status, activated, crashed, work_time = row
-        
-        if current_user != user_id:
-            if current_user is not None:
-                report += "\n"
-            current_user = user_id
-            report += f"👤 @{username or first_name} (ID: {user_id}):\n"
-        
-        if acc_id:
-            status_emoji = {
-                'activated': '✅', 'crashed': '💥', 'failed': '❌', 'cancelled': '🚫'
-            }.get(status, '⏳')
-            
-            time_str = ""
-            if work_time:
-                hours = work_time // 3600
-                minutes = (work_time % 3600) // 60
-                days = hours // 24
-                hours = hours % 24
-                time_str = f"{days}д {hours}ч {minutes}мин" if days > 0 else f"{hours}ч {minutes}мин"
-            
-            activated_str = datetime.strptime(activated, '%Y-%m-%d %H:%M:%S.%f').strftime('%H:%M') if activated else '-'
-            crashed_str = datetime.strptime(crashed, '%Y-%m-%d %H:%M:%S.%f').strftime('%H:%M') if crashed else '-'
-            
-            report += f"   {status_emoji} {phone}\n"
-            report += f"      ✅ Активирован: {activated_str}\n"
-            report += f"      💥 Слетел: {crashed_str}\n"
-            report += f"      ⏱ Проработал: {time_str}\n"
-    
-    if len(report) > 4000:
-        for i in range(0, len(report), 4000):
-            update.message.reply_text(report[i:i+4000], parse_mode='Markdown')
-    else:
-        update.message.reply_text(report, parse_mode='Markdown')
-
 def handle_callback(update: Update, context: CallbackContext):
     query = update.callback_query
     query.answer()
@@ -1904,84 +1892,45 @@ def handle_callback(update: Update, context: CallbackContext):
     user_id = query.from_user.id
     role = db.get_user_role(user_id)
     
-    if data == "refresh_referral":
-        show_referral_info(update, context, user_id)
+    # ===== ОБРАБОТЧИКИ ДЛЯ WHATSAPP =====
     
-    elif data == "fines_list_all":
-        fines = db.get_all_fines()
-        
-        if not fines:
-            query.edit_message_text("📋 Нет штрафов.")
-            return
-        
-        text = "📋 **Все штрафы:**\n\n"
-        for fine in fines[:10]:
-            text += f"ID: {fine[0]}\n"
-            text += f"👤 Пользователь: @{fine[11] or fine[10]}\n"
-            text += f"💰 Сумма: ${fine[3]}\n"
-            text += f"📝 Причина: {fine[4]}\n"
-            text += f"📅 Дата: {fine[5]}\n"
-            text += f"👮 Выдал: @{fine[12]}\n"
-            text += f"📊 Статус: {fine[6]}\n\n"
-        
-        query.edit_message_text(text, parse_mode='Markdown')
-    
-    elif data == "fines_add":
-        query.edit_message_text(
-            "Введите ID пользователя, на которого хотите наложить штраф:"
-        )
-        return WAITING_FOR_FINE_USER
-    
-    elif data == "fines_reset":
-        query.edit_message_text(
-            "Введите ID штрафа, который хотите обнулить:"
-        )
-        return WAITING_FOR_FINE_RESET
-    
-    elif data.startswith('wa_take_qr_') or data.startswith('wa_take_code_'):
+    if data.startswith('wa_take_code_'):
         if role not in ['cold', 'helper', 'owner']:
             query.edit_message_text("❌ У вас нет прав для этого действия.")
             return
         
-        is_qr = 'qr' in data
         number_id = int(data.split('_')[3])
         
         if db.take_number(number_id, user_id):
             context.user_data['current_number_id'] = number_id
-            
-            if is_qr:
-                query.edit_message_text(
-                    "📷 Отправьте **фото с QR кодом** для WhatsApp.\n"
-                    "Убедитесь, что QR код хорошо видно.",
-                    parse_mode='Markdown'
-                )
-                return WAITING_FOR_QR_PHOTO
-            else:
-                query.edit_message_text(
-                    "📷 Отправьте **фото с кодом** для WhatsApp.\n"
-                    "Убедитесь, что код хорошо видно.",
-                    parse_mode='Markdown'
-                )
-                return WAITING_FOR_CODE_PHOTO
+            query.edit_message_text(
+                "📷 Отправьте **фото с кодом** для WhatsApp.\n"
+                "Убедитесь, что код хорошо видно.",
+                parse_mode='Markdown'
+            )
+            return WAITING_FOR_CODE_PHOTO
         else:
             query.edit_message_text("❌ Этот номер уже взят другим.")
     
-    elif data.startswith('wa_send_qr_') or data.startswith('wa_send_code_'):
+    elif data.startswith('wa_take_qr_'):
         if role not in ['cold', 'helper', 'owner']:
-            query.edit_message_text("❌ У вас нет прав.")
+            query.edit_message_text("❌ У вас нет прав для этого действия.")
             return
         
-        is_qr = 'qr' in data
         number_id = int(data.split('_')[3])
         
-        context.user_data['current_number_id'] = number_id
-        
-        if is_qr:
-            query.edit_message_text("📷 Отправьте фото с QR кодом:")
+        if db.take_number(number_id, user_id):
+            context.user_data['current_number_id'] = number_id
+            query.edit_message_text(
+                "📷 Отправьте **фото с QR кодом** для WhatsApp.\n"
+                "Убедитесь, что QR код хорошо видно.",
+                parse_mode='Markdown'
+            )
             return WAITING_FOR_QR_PHOTO
         else:
-            query.edit_message_text("📷 Отправьте фото с кодом:")
-            return WAITING_FOR_CODE_PHOTO
+            query.edit_message_text("❌ Этот номер уже взят другим.")
+    
+    # ===== ОБРАБОТЧИКИ ДЛЯ MAX =====
     
     elif data.startswith('max_take_'):
         if role not in ['cold', 'helper', 'owner']:
@@ -2142,6 +2091,8 @@ def handle_callback(update: Update, context: CallbackContext):
         )
         return WAITING_FOR_MAX_CODE
     
+    # ===== ОБРАБОТЧИКИ ДЛЯ WHATSAPP СТАТУСОВ =====
+    
     elif data.startswith('activated_'):
         if role not in ['cold', 'helper', 'owner']:
             query.edit_message_text("❌ У вас нет прав.")
@@ -2185,7 +2136,10 @@ def handle_callback(update: Update, context: CallbackContext):
                 chat_id=number[2],
                 text=f"❌ Номер {number[1]} не удалось активировать.\n"
                      f"Попробуйте позже.",
-                reply_markup=get_retry_keyboard(number_id)
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("🔄 Повторить", callback_data=f"retry_{number_id}"),
+                    InlineKeyboardButton("❌ Отменить", callback_data=f"cancel_number_{number_id}")
+                ]])
             )
             
             query.edit_message_text(f"❌ Номер #{number_id} отмечен как неудачный.")
@@ -2249,7 +2203,10 @@ def handle_callback(update: Update, context: CallbackContext):
                         text=f"🔔 Пользователь подтвердил ввод кода для номера {number[1]}\n"
                              f"Заявка #{number_id}\n"
                              f"Теперь можно проверить активацию.",
-                        reply_markup=get_code_action_keyboard(number_id)
+                        reply_markup=InlineKeyboardMarkup([[
+                            InlineKeyboardButton("✅ Встал", callback_data=f"activated_{number_id}"),
+                            InlineKeyboardButton("❌ Не встал", callback_data=f"failed_{number_id}")
+                        ]])
                     )
                 except:
                     pass
@@ -2290,27 +2247,66 @@ def handle_callback(update: Update, context: CallbackContext):
             db.update_number_status(number_id, 'cancelled', in_queue=0, taken_by=None)
             query.edit_message_text("❌ Номер отменен.")
     
-    elif data.startswith('wa_queue_keep_'):
-        number_id = int(data.split('_')[3])
-        db.cursor.execute('UPDATE numbers SET last_queue_notification = ? WHERE id = ?', (datetime.now(), number_id))
-        db.conn.commit()
-        query.edit_message_text("✅ Номер останется в очереди.")
+    # ===== ОБРАБОТЧИКИ ДЛЯ РЕФЕРАЛОВ И ШТРАФОВ =====
     
-    elif data.startswith('wa_queue_remove_'):
-        number_id = int(data.split('_')[3])
-        db.update_number_status(number_id, 'cancelled', in_queue=0, taken_by=None)
-        query.edit_message_text("❌ Номер убран из очереди.")
+    elif data == "refresh_referral":
+        show_referral_info(query, context, user_id)
     
-    elif data.startswith('max_queue_keep_'):
-        account_id = int(data.split('_')[3])
-        db.cursor.execute('UPDATE max_accounts SET last_queue_notification = ? WHERE id = ?', (datetime.now(), account_id))
-        db.conn.commit()
-        query.edit_message_text("✅ Аккаунт останется в очереди.")
+    elif data == "fines_list_all":
+        fines = db.get_all_fines()
+        
+        if not fines:
+            query.edit_message_text("📋 Нет штрафов.")
+            return
+        
+        text = "📋 **Все штрафы:**\n\n"
+        for fine in fines[:10]:
+            text += f"ID: {fine[0]}\n"
+            text += f"👤 Пользователь: @{fine[11] or fine[10]}\n"
+            text += f"💰 Сумма: ${fine[3]}\n"
+            text += f"📝 Причина: {fine[4]}\n"
+            text += f"📅 Дата: {fine[5]}\n"
+            text += f"👮 Выдал: @{fine[12]}\n"
+            text += f"📊 Статус: {fine[6]}\n\n"
+        
+        query.edit_message_text(text, parse_mode='Markdown')
     
-    elif data.startswith('max_queue_remove_'):
-        account_id = int(data.split('_')[3])
-        db.update_max_status(account_id, 'cancelled', in_queue=0, taken_by=None)
-        query.edit_message_text("❌ Аккаунт убран из очереди.")
+    elif data == "fines_add":
+        query.edit_message_text(
+            "Введите ID пользователя, на которого хотите наложить штраф:"
+        )
+        return WAITING_FOR_FINE_USER
+    
+    elif data == "fines_reset":
+        query.edit_message_text(
+            "Введите ID штрафа, который хотите обнулить:"
+        )
+        return WAITING_FOR_FINE_RESET
+
+def get_max_action_keyboard(account_id, taken_by=None, status=None):
+    """Создает клавиатуру для MAX аккаунта"""
+    buttons = []
+    
+    if status == 'in_progress':
+        buttons.append(InlineKeyboardButton("🔑 Запросить код", callback_data=f"max_request_code_{account_id}"))
+    if status in ['in_progress', 'code_received']:
+        buttons.append(InlineKeyboardButton("📝 Запросить доп инфо", callback_data=f"max_request_extra_{account_id}"))
+    if status == 'code_received':
+        buttons.append(InlineKeyboardButton("✅ Активирован", callback_data=f"max_activated_{account_id}"))
+        buttons.append(InlineKeyboardButton("❌ Не встал", callback_data=f"max_failed_{account_id}"))
+    if status == 'activated':
+        buttons.append(InlineKeyboardButton("💥 Слетел", callback_data=f"max_crashed_{account_id}"))
+    
+    if not buttons:
+        return None
+    
+    keyboard = []
+    for i in range(0, len(buttons), 2):
+        keyboard.append(buttons[i:i+2])
+    
+    return InlineKeyboardMarkup(keyboard)
+
+# ========== ОБРАБОТЧИКИ ДЛЯ ФОТО И КОДОВ ==========
 
 def handle_whatsapp_code_photo(update: Update, context: CallbackContext):
     number_id = context.user_data.get('current_number_id')
@@ -2346,11 +2342,51 @@ def handle_whatsapp_code_photo(update: Update, context: CallbackContext):
     )
     
     role = db.get_user_role(update.effective_user.id)
-    keyboard = get_cold_keyboard() if role == 'cold' else get_helper_keyboard()
-    
     update.message.reply_text(
         f"✅ {type_text} отправлен пользователю!",
-        reply_markup=keyboard
+        reply_markup=get_main_keyboard(role)
+    )
+    
+    context.user_data.pop('current_number_id', None)
+    return ConversationHandler.END
+
+def handle_whatsapp_qr_photo(update: Update, context: CallbackContext):
+    # Аналогично handle_whatsapp_code_photo
+    number_id = context.user_data.get('current_number_id')
+    
+    if not number_id:
+        update.message.reply_text("❌ Ошибка: не найден номер заявки.")
+        return ConversationHandler.END
+    
+    number = db.get_number_by_id(number_id)
+    if not number:
+        update.message.reply_text("❌ Ошибка: заявка не найдена.")
+        return ConversationHandler.END
+    
+    photo = update.message.photo[-1]
+    photo_id = photo.file_id
+    
+    db.update_number_status(
+        number_id,
+        'code_sent',
+        qr_photo_id=photo_id,
+        code_sent_at=datetime.now()
+    )
+    
+    context.bot.send_photo(
+        chat_id=number[2],
+        photo=photo_id,
+        caption=f"📷 QR код для WhatsApp {number[1]}\n\n"
+                f"Отсканируйте и нажмите 'Код введен'",
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("✅ Код введен", callback_data=f"code_entered_{number_id}")
+        ]])
+    )
+    
+    role = db.get_user_role(update.effective_user.id)
+    update.message.reply_text(
+        f"✅ QR код отправлен пользователю!",
+        reply_markup=get_main_keyboard(role)
     )
     
     context.user_data.pop('current_number_id', None)
@@ -2379,12 +2415,12 @@ def handle_max_code_input(update: Update, context: CallbackContext):
         
         update.message.reply_text(
             "✅ Код отправлен холодке! Ожидайте результата активации.",
-            reply_markup=get_user_keyboard()
+            reply_markup=get_main_keyboard('user')
         )
     else:
         update.message.reply_text(
             "❌ Ошибка при отправке кода.",
-            reply_markup=get_user_keyboard()
+            reply_markup=get_main_keyboard('user')
         )
     
     context.user_data.pop('current_max_account_id', None)
@@ -2413,19 +2449,15 @@ def handle_max_extra_info(update: Update, context: CallbackContext):
         )
         
         role = db.get_user_role(user_id)
-        keyboard = get_cold_keyboard() if role == 'cold' else get_helper_keyboard()
-        
         update.message.reply_text(
             f"✅ Запрос отправлен пользователю!",
-            reply_markup=keyboard
+            reply_markup=get_main_keyboard(role)
         )
     else:
         role = db.get_user_role(user_id)
-        keyboard = get_cold_keyboard() if role == 'cold' else get_helper_keyboard()
-        
         update.message.reply_text(
             "❌ Ошибка при отправке запроса.",
-            reply_markup=keyboard
+            reply_markup=get_main_keyboard(role)
         )
     
     context.user_data.pop('current_max_extra_id', None)
@@ -2453,16 +2485,18 @@ def handle_max_extra_reply(update: Update, context: CallbackContext):
         
         update.message.reply_text(
             "✅ Ответ отправлен холодке!",
-            reply_markup=get_user_keyboard()
+            reply_markup=get_main_keyboard('user')
         )
     else:
         update.message.reply_text(
             "❌ Ошибка при отправке ответа.",
-            reply_markup=get_user_keyboard()
+            reply_markup=get_main_keyboard('user')
         )
     
     context.user_data.pop('current_max_extra_account_id', None)
     return ConversationHandler.END
+
+# ========== ОБРАБОТЧИКИ ДЛЯ ШТРАФОВ ==========
 
 def handle_fine_user_input(update: Update, context: CallbackContext):
     try:
@@ -2510,11 +2544,13 @@ def handle_fine_reason_input(update: Update, context: CallbackContext):
     except:
         pass
     
+    role = db.get_user_role(issuer_id)
     update.message.reply_text(
         f"✅ Штраф #{fine_id} наложен!\n"
         f"👤 Пользователь: {target_id}\n"
         f"💰 Сумма: ${amount}\n"
-        f"📝 Причина: {reason}"
+        f"📝 Причина: {reason}",
+        reply_markup=get_main_keyboard(role)
     )
     
     context.user_data.pop('fine_target', None)
@@ -2536,25 +2572,10 @@ def handle_fine_reset_input(update: Update, context: CallbackContext):
     
     return ConversationHandler.END
 
-def cancel(update: Update, context: CallbackContext):
-    role = db.get_user_role(update.effective_user.id)
-    
-    if role == 'owner':
-        keyboard = get_owner_keyboard()
-    elif role == 'helper':
-        keyboard = get_helper_keyboard()
-    elif role == 'cold':
-        keyboard = get_cold_keyboard()
-    else:
-        keyboard = get_user_keyboard()
-    
-    update.message.reply_text(
-        "Действие отменено.",
-        reply_markup=keyboard
-    )
-    return ConversationHandler.END
+# ========== ФОНОВЫЕ ЗАДАЧИ ==========
 
 def queue_check_job(context: CallbackContext):
+    """Проверка очереди WhatsApp"""
     db.cursor.execute('''
         SELECT id, user_id, queue_position, phone_number
         FROM numbers 
@@ -2573,13 +2594,17 @@ def queue_check_job(context: CallbackContext):
                 chat_id=user_id,
                 text=f"⏳ Ваш WhatsApp номер {phone} все еще в очереди (позиция: {position}).\n"
                      f"Хотите оставить его?",
-                reply_markup=get_queue_check_keyboard(number_id, 'whatsapp')
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("✅ Да, оставить", callback_data=f"wa_queue_keep_{number_id}"),
+                    InlineKeyboardButton("❌ Нет, убрать", callback_data=f"wa_queue_remove_{number_id}")
+                ]])
             )
             db.cursor.execute('UPDATE numbers SET last_queue_notification = ? WHERE id = ?', (datetime.now(), number_id))
             db.conn.commit()
         except Exception as e:
             logger.error(f"Failed to send queue check: {e}")
     
+    # Проверка очереди MAX
     db.cursor.execute('''
         SELECT id, user_id, queue_position, phone_number
         FROM max_accounts 
@@ -2598,7 +2623,10 @@ def queue_check_job(context: CallbackContext):
                 chat_id=user_id,
                 text=f"⏳ Ваш MAX аккаунт {phone} все еще в очереди (позиция: {position}).\n"
                      f"Хотите оставить его?",
-                reply_markup=get_queue_check_keyboard(acc_id, 'max')
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("✅ Да, оставить", callback_data=f"max_queue_keep_{acc_id}"),
+                    InlineKeyboardButton("❌ Нет, убрать", callback_data=f"max_queue_remove_{acc_id}")
+                ]])
             )
             db.cursor.execute('UPDATE max_accounts SET last_queue_notification = ? WHERE id = ?', (datetime.now(), acc_id))
             db.conn.commit()
@@ -2606,6 +2634,7 @@ def queue_check_job(context: CallbackContext):
             logger.error(f"Failed to send MAX queue check: {e}")
 
 def check_active_numbers(context: CallbackContext):
+    """Проверка активных WhatsApp номеров"""
     active_numbers = db.get_active_numbers()
     
     for number in active_numbers:
@@ -2614,7 +2643,7 @@ def check_active_numbers(context: CallbackContext):
             now = datetime.now()
             work_duration = int((now - activated).total_seconds())
             
-            if work_duration % 600 == 0:
+            if work_duration % 600 == 0:  # Каждые 10 минут
                 db.add_working_time(number[2], 600, platform='whatsapp')
     
     active_max = db.get_active_max_accounts()
@@ -2628,14 +2657,26 @@ def check_active_numbers(context: CallbackContext):
             if work_duration % 600 == 0:
                 db.add_working_time(acc[2], 600, platform='max')
 
+def cancel(update: Update, context: CallbackContext):
+    """Отмена действия"""
+    role = db.get_user_role(update.effective_user.id)
+    update.message.reply_text(
+        "❌ Действие отменено.",
+        reply_markup=get_main_keyboard(role)
+    )
+    return ConversationHandler.END
+
+# ========== ГЛАВНАЯ ФУНКЦИЯ ==========
+
 def main():
+    """Запуск бота"""
     updater = Updater(token=config.BOT_TOKEN, use_context=True)
     dp = updater.dispatcher
     
-    # ConversationHandler для соглашения
+    # ===== СОГЛАШЕНИЕ =====
     dp.add_handler(CallbackQueryHandler(handle_agreement, pattern='^accept_agreement$'))
     
-    # WhatsApp номер
+    # ===== WHATSAPP НОМЕР =====
     wa_number_conv = ConversationHandler(
         entry_points=[MessageHandler(Filters.text("📱 WhatsApp"), handle_message)],
         states={
@@ -2646,7 +2687,7 @@ def main():
     )
     dp.add_handler(wa_number_conv)
     
-    # MAX номер
+    # ===== MAX НОМЕР =====
     max_number_conv = ConversationHandler(
         entry_points=[MessageHandler(Filters.text("📲 MAX"), handle_message)],
         states={
@@ -2656,23 +2697,21 @@ def main():
     )
     dp.add_handler(max_number_conv)
     
-    # Фото для WhatsApp
+    # ===== ФОТО ДЛЯ WHATSAPP =====
     wa_photo_conv = ConversationHandler(
         entry_points=[
-            CallbackQueryHandler(handle_callback, pattern='^wa_send_code_'),
-            CallbackQueryHandler(handle_callback, pattern='^wa_send_qr_'),
             CallbackQueryHandler(handle_callback, pattern='^wa_take_code_'),
             CallbackQueryHandler(handle_callback, pattern='^wa_take_qr_')
         ],
         states={
             WAITING_FOR_CODE_PHOTO: [MessageHandler(Filters.photo, handle_whatsapp_code_photo)],
-            WAITING_FOR_QR_PHOTO: [MessageHandler(Filters.photo, handle_whatsapp_code_photo)]
+            WAITING_FOR_QR_PHOTO: [MessageHandler(Filters.photo, handle_whatsapp_qr_photo)]
         },
         fallbacks=[CommandHandler('cancel', cancel)]
     )
     dp.add_handler(wa_photo_conv)
     
-    # Код для MAX
+    # ===== КОД ДЛЯ MAX =====
     max_code_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(handle_callback, pattern='^max_send_code_')],
         states={
@@ -2682,7 +2721,7 @@ def main():
     )
     dp.add_handler(max_code_conv)
     
-    # Доп информация для MAX
+    # ===== ДОП ИНФОРМАЦИЯ ДЛЯ MAX =====
     max_extra_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(handle_callback, pattern='^max_request_extra_')],
         states={
@@ -2692,7 +2731,7 @@ def main():
     )
     dp.add_handler(max_extra_conv)
     
-    # Ответ на доп запрос
+    # ===== ОТВЕТ НА ДОП ЗАПРОС =====
     max_user_reply_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(handle_callback, pattern='^max_reply_extra_')],
         states={
@@ -2702,7 +2741,7 @@ def main():
     )
     dp.add_handler(max_user_reply_conv)
     
-    # Штрафы
+    # ===== ШТРАФЫ =====
     fines_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(handle_callback, pattern='^fines_')],
         states={
@@ -2715,17 +2754,7 @@ def main():
     )
     dp.add_handler(fines_conv)
     
-    # Изменение ролей
-    role_change_conv = ConversationHandler(
-        entry_points=[MessageHandler(Filters.text("👥 Управление ролями"), handle_message)],
-        states={
-            WAITING_FOR_ROLE_CHANGE: [MessageHandler(Filters.text & ~Filters.command, handle_role_change)]
-        },
-        fallbacks=[CommandHandler('cancel', cancel)]
-    )
-    dp.add_handler(role_change_conv)
-    
-    # Удаление из очереди
+    # ===== УДАЛЕНИЕ ИЗ ОЧЕРЕДИ =====
     queue_remove_conv = ConversationHandler(
         entry_points=[MessageHandler(Filters.text("🗑 Удалить из очереди"), handle_message)],
         states={
@@ -2735,17 +2764,18 @@ def main():
     )
     dp.add_handler(queue_remove_conv)
     
-    # Основные обработчики
+    # ===== ОСНОВНЫЕ ОБРАБОТЧИКИ =====
     dp.add_handler(CommandHandler('start', start))
     dp.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
     dp.add_handler(CallbackQueryHandler(handle_callback))
     
-    # Фоновые задачи
+    # ===== ФОНОВЫЕ ЗАДАЧИ =====
     from telegram.ext import JobQueue
     job_queue = updater.job_queue
     job_queue.run_repeating(check_active_numbers, interval=600, first=10)
     job_queue.run_repeating(queue_check_job, interval=300, first=60)
     
+    # ===== ЗАПУСК =====
     updater.start_polling()
     updater.idle()
 
