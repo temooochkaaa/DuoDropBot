@@ -482,6 +482,9 @@ class Database:
         if 'in_queue' in kwargs:
             query += ", in_queue = ?"
             values.append(kwargs['in_queue'])
+        if 'taken_by' in kwargs:
+            query += ", taken_by = ?"
+            values.append(kwargs['taken_by'])
         
         query += " WHERE id = ?"
         values.append(number_id)
@@ -844,7 +847,7 @@ class Database:
                    cold_activated_today, cold_activated_week, cold_activated_month
             FROM users WHERE user_id = ?
         ''', (user_id,))
-        return self.cursor.fetchone()
+        return self.cursor.fetchall()
     
     def get_daily_stats(self, date, platform='whatsapp'):
         if platform == 'whatsapp':
@@ -1146,6 +1149,148 @@ def start(update: Update, context: CallbackContext):
     
     db.add_log(user.id, user.username, 'user_start', 'Started bot', 'auth')
 
+def handle_agreement(update: Update, context: CallbackContext):
+    query = update.callback_query
+    query.answer()
+    
+    user_id = query.from_user.id
+    
+    if query.data == "accept_agreement":
+        db.accept_agreement(user_id)
+        
+        query.edit_message_text(
+            "✅ Спасибо! Вы приняли пользовательское соглашение.\n\n"
+            "Теперь вы можете пользоваться ботом.",
+            parse_mode='Markdown'
+        )
+        
+        role = db.get_user_role(user_id)
+        welcome_text = WELCOME_TEXT + f"\n\n👋 Привет, {query.from_user.first_name}! Твой статус: {get_role_name(role)}"
+        
+        context.bot.send_message(
+            chat_id=user_id,
+            text=welcome_text,
+            parse_mode='Markdown',
+            disable_web_page_preview=True,
+            reply_markup=get_main_menu_keyboard(role)
+        )
+    
+    return ConversationHandler.END
+
+def show_my_referrals(update, context, user_id):
+    """Показывает список рефералов с их статусом"""
+    pending = db.get_pending_referrals(user_id)
+    qualified = db.get_qualified_referrals(user_id)
+    
+    text = "👥 **Мои рефералы**\n\n"
+    
+    if qualified:
+        text += "✅ **Квалифицированные (2+ номеров):**\n"
+        for ref in qualified:
+            ref_user_id, username, first_name, date = ref
+            date_str = datetime.strptime(date, '%Y-%m-%d %H:%M:%S.%f').strftime('%d.%m.%Y')
+            username_display = f"@{username}" if username else first_name
+            text += f"• {username_display} - {date_str}\n"
+        text += "\n"
+    
+    if pending:
+        text += "⏳ **Ожидают квалификации:**\n"
+        for ref in pending:
+            ref_user_id, username, first_name, date = ref
+            date_str = datetime.strptime(date, '%Y-%m-%d %H:%M:%S.%f').strftime('%d.%m.%Y')
+            username_display = f"@{username}" if username else first_name
+            text += f"• {username_display} - {date_str}\n"
+        text += "\n"
+    
+    if not qualified and not pending:
+        text += "У вас пока нет рефералов.\n\n"
+        text += "Приглашайте друзей по вашей реферальной ссылке!"
+    
+    keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="menu_referrals")]]
+    
+    update.edit_message_text(
+        text,
+        parse_mode='Markdown',
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+def show_referral_info(update, context, user_id):
+    """Показывает информацию о рефералах"""
+    info = db.get_referral_info(user_id)
+    if not info:
+        update.edit_message_text(
+            "❌ Ошибка получения информации.",
+            reply_markup=get_main_menu_keyboard(db.get_user_role(user_id))
+        )
+        return
+    
+    qualified, balance, total = info
+    
+    text = (
+        f"💰 **Реферальная программа DuoDropTeam**\n\n"
+        f"👥 **Квалифицированные рефералы:** {qualified}\n"
+        f"💵 **Текущий баланс:** ${balance:.2f}\n"
+        f"📊 **Всего заработано:** ${total:.2f}\n\n"
+        f"**Условия:**\n"
+        f"• Реферал засчитывается только после сдачи 2+ номеров\n"
+        f"• За каждого квалифицированного реферала +1$\n"
+        f"• Минимальная сумма для вывода: 5$\n"
+        f"• Для вывода напишите @popopep\n\n"
+    )
+    
+    if balance >= 5:
+        text += f"✅ **Вы можете вывести ${balance:.2f}!**\n"
+        text += f"Напишите @popopep для получения выплаты.\n\n"
+    else:
+        need = 5 - balance
+        text += f"⏳ **До вывода осталось: ${need:.2f}**\n\n"
+    
+    bot_username = context.bot.get_me().username
+    ref_link = f"https://t.me/{bot_username}?start={user_id}"
+    text += f"**Ваша реферальная ссылка:**\n`{ref_link}`"
+    
+    keyboard = [
+        [
+            InlineKeyboardButton("👥 Мои рефералы", callback_data="my_referrals"),
+            InlineKeyboardButton("🔄 Обновить", callback_data="refresh_referral")
+        ],
+        [InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")]
+    ]
+    
+    update.edit_message_text(
+        text,
+        parse_mode='Markdown',
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+def show_profile(update, context, user_id):
+    """Показывает профиль пользователя"""
+    user = update.from_user
+    role = db.get_user_role(user_id)
+    
+    # Получаем реферальную информацию
+    ref_info = db.get_referral_info(user_id)
+    ref_balance = ref_info[1] if ref_info else 0
+    
+    text = (
+        f"👤 **Профиль пользователя**\n\n"
+        f"**ID:** `{user_id}`\n"
+        f"**Username:** @{user.username or 'нет'}\n"
+        f"**Имя:** {user.first_name}\n"
+        f"**Роль:** {get_role_name(role)}\n"
+        f"💰 **Реферальный баланс:** ${ref_balance:.2f}\n\n"
+        f"📢 **Наша группа:** [Присоединяйся!](https://t.me/+owH-s8y7T8RmZGEy)\n"
+        f"⭐ **Репутация:** [@reputatiooonnn](https://t.me/reputatiooonnn)\n\n"
+        f"📊 Для просмотра статистики нажмите кнопку ниже."
+    )
+    
+    update.edit_message_text(
+        text,
+        parse_mode='Markdown',
+        disable_web_page_preview=True,
+        reply_markup=get_profile_menu_keyboard()
+    )
+
 def handle_callback(update: Update, context: CallbackContext):
     query = update.callback_query
     query.answer()
@@ -1163,7 +1308,7 @@ def handle_callback(update: Update, context: CallbackContext):
         )
         return
     
-    elif data == "back_to_submit_menu":
+    elif data == "menu_submit":
         query.edit_message_text(
             "📱 Выберите платформу для сдачи номера:",
             reply_markup=get_submit_menu_keyboard()
@@ -1218,20 +1363,20 @@ def handle_callback(update: Update, context: CallbackContext):
     
     # ===== ВЫБОР ПЛАТФОРМЫ ДЛЯ СДАЧИ =====
     
-        elif data == "submit_whatsapp":
+    elif data == "submit_whatsapp":
         query.edit_message_text(
             "📞 Введите номер телефона для WhatsApp в международном формате (например: 79123456789):",
             reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🔙 Назад", callback_data="back_to_submit_menu")
+                InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")
             ]])
         )
         return WAITING_FOR_NUMBER
     
-        elif data == "submit_max":
+    elif data == "submit_max":
         query.edit_message_text(
             "📞 Введите номер телефона для MAX в международном формате (например: 79123456789):",
             reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🔙 Назад", callback_data="back_to_submit_menu")
+                InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")
             ]])
         )
         return WAITING_FOR_MAX_NUMBER
@@ -1435,7 +1580,9 @@ def handle_callback(update: Update, context: CallbackContext):
                 "📷 Отправьте **фото с кодом** для WhatsApp.\n"
                 "Убедитесь, что код хорошо видно.",
                 parse_mode='Markdown',
-                reply_markup=get_back_keyboard("cold_wa_queue")
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("🔙 Назад", callback_data="cold_wa_queue")
+                ]])
             )
             return WAITING_FOR_CODE_PHOTO
         else:
@@ -1455,7 +1602,9 @@ def handle_callback(update: Update, context: CallbackContext):
                 "📷 Отправьте **фото с QR кодом** для WhatsApp.\n"
                 "Убедитесь, что QR код хорошо видно.",
                 parse_mode='Markdown',
-                reply_markup=get_back_keyboard("cold_wa_queue")
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("🔙 Назад", callback_data="cold_wa_queue")
+                ]])
             )
             return WAITING_FOR_QR_PHOTO
         else:
@@ -1825,7 +1974,7 @@ def handle_callback(update: Update, context: CallbackContext):
     elif data == "refresh_referral":
         show_referral_info(query, context, user_id)
         return
-
+    
     elif data == "my_referrals":
         show_my_referrals(query, context, user_id)
         return
@@ -2146,36 +2295,6 @@ def show_all_max_queue(update, context):
         reply_markup=get_back_keyboard(panel)
     )
 
-# ========== ФУНКЦИИ ДЛЯ ПРОФИЛЯ И СТАТИСТИКИ ==========
-
-def show_profile(update, context, user_id):
-    """Показывает профиль пользователя"""
-    user = update.from_user
-    role = db.get_user_role(user_id)
-    
-    # Получаем реферальную информацию
-    ref_info = db.get_referral_info(user_id)
-    ref_balance = ref_info[1] if ref_info else 0
-    
-    text = (
-        f"👤 **Профиль пользователя**\n\n"
-        f"**ID:** `{user_id}`\n"
-        f"**Username:** @{user.username or 'нет'}\n"
-        f"**Имя:** {user.first_name}\n"
-        f"**Роль:** {get_role_name(role)}\n"
-        f"💰 **Реферальный баланс:** ${ref_balance:.2f}\n\n"
-        f"📢 **Наша группа:** [Присоединяйся!](https://t.me/+owH-s8y7T8RmZGEy)\n"
-        f"⭐ **Репутация:** [@reputatiooonnn](https://t.me/reputatiooonnn)\n\n"
-        f"📊 Для просмотра статистики нажмите кнопку ниже."
-    )
-    
-    update.edit_message_text(
-        text,
-        parse_mode='Markdown',
-        disable_web_page_preview=True,
-        reply_markup=get_profile_menu_keyboard()
-    )
-
 def show_cold_stats(update, context, cold_id):
     """Показывает статистику холодки"""
     stats = db.get_user_stats(cold_id)
@@ -2211,55 +2330,6 @@ def show_cold_stats(update, context, cold_id):
         text,
         parse_mode='Markdown',
         reply_markup=get_cold_panel_keyboard()
-    )
-
-def show_referral_info(update, context, user_id):
-    """Показывает информацию о рефералах"""
-    info = db.get_referral_info(user_id)
-    if not info:
-        update.edit_message_text(
-            "❌ Ошибка получения информации.",
-            reply_markup=get_main_menu_keyboard(db.get_user_role(user_id))
-        )
-        return
-    
-    qualified, balance, total = info
-    
-    text = (
-        f"💰 **Реферальная программа DuoDropTeam**\n\n"
-        f"👥 **Квалифицированные рефералы:** {qualified}\n"
-        f"💵 **Текущий баланс:** ${balance:.2f}\n"
-        f"📊 **Всего заработано:** ${total:.2f}\n\n"
-        f"**Условия:**\n"
-        f"• Реферал засчитывается только после сдачи 2+ номеров\n"
-        f"• За каждого квалифицированного реферала +1$\n"
-        f"• Минимальная сумма для вывода: 5$\n"
-        f"• Для вывода напишите @popopep\n\n"
-    )
-    
-    if balance >= 5:
-        text += f"✅ **Вы можете вывести ${balance:.2f}!**\n"
-        text += f"Напишите @popopep для получения выплаты.\n\n"
-    else:
-        need = 5 - balance
-        text += f"⏳ **До вывода осталось: ${need:.2f}**\n\n"
-    
-    bot_username = context.bot.get_me().username
-    ref_link = f"https://t.me/{bot_username}?start={user_id}"
-    text += f"**Ваша реферальная ссылка:**\n`{ref_link}`"
-    
-    keyboard = [
-        [
-            InlineKeyboardButton("👥 Мои рефералы", callback_data="my_referrals"),
-            InlineKeyboardButton("🔄 Обновить", callback_data="refresh_referral")
-        ],
-        [InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")]
-    ]
-    
-    update.edit_message_text(
-        text,
-        parse_mode='Markdown',
-        reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
 def check_user_queue(update, context, user_id):
@@ -2489,8 +2559,8 @@ def generate_user_report_file(update, context, user_id):
     
     os.remove(filename)
     
-    # Отправляем кнопку назад
-        role = db.get_user_role(user_id)
+    # Отправляем кнопку назад в главное меню
+    role = db.get_user_role(user_id)
     context.bot.send_message(
         chat_id=user_id,
         text="📊 Отчет отправлен. Вернуться в меню:",
@@ -2634,7 +2704,9 @@ def handle_whatsapp_number_input(update: Update, context: CallbackContext):
     if not phone_number.isdigit() or len(phone_number) < 10:
         update.message.reply_text(
             "❌ Неверный формат номера. Попробуйте снова:",
-            reply_markup=get_back_keyboard("submit")
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")
+            ]])
         )
         return WAITING_FOR_NUMBER
     
@@ -2646,7 +2718,7 @@ def handle_whatsapp_number_input(update: Update, context: CallbackContext):
             InlineKeyboardButton("📝 Обычный код", callback_data="type_code"),
             InlineKeyboardButton("📷 QR код", callback_data="type_qr")
         ],
-        [InlineKeyboardButton("🔙 Назад", callback_data="back_to_submit")]
+        [InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")]
     ]
     update.message.reply_text(
         "📱 Выберите тип получения кода для WhatsApp:",
@@ -2661,7 +2733,9 @@ def handle_max_number_input(update: Update, context: CallbackContext):
     if not phone_number.isdigit() or len(phone_number) < 10:
         update.message.reply_text(
             "❌ Неверный формат номера. Попробуйте снова:",
-            reply_markup=get_back_keyboard("submit")
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")
+            ]])
         )
         return WAITING_FOR_MAX_NUMBER
     
@@ -2698,10 +2772,11 @@ def handle_type_selection(update: Update, context: CallbackContext):
     phone_number = context.user_data.get('temp_phone')
     platform = context.user_data.get('platform', 'whatsapp')
     
-    if selection == "back_to_submit":
+    if selection == "back_to_main":
+        role = db.get_user_role(user_id)
         query.edit_message_text(
-            "📱 Выберите платформу для сдачи номера:",
-            reply_markup=get_submit_menu_keyboard()
+            "🔙 Главное меню",
+            reply_markup=get_main_menu_keyboard(role)
         )
         return ConversationHandler.END
     
@@ -3103,7 +3178,8 @@ def handle_role_change(update: Update, context: CallbackContext):
         if len(parts) != 2:
             update.message.reply_text(
                 "❌ Нужно ввести: роль и ID/username\n"
-                "Пример: cold 123456789 или helper @username"
+                "Пример: cold 123456789 или helper @username",
+                reply_markup=get_owner_panel_keyboard()
             )
             return
         
@@ -3112,7 +3188,8 @@ def handle_role_change(update: Update, context: CallbackContext):
         
         if role not in ['owner', 'helper', 'cold', 'user']:
             update.message.reply_text(
-                "❌ Неверная роль. Доступны: owner, helper, cold, user"
+                "❌ Неверная роль. Доступны: owner, helper, cold, user",
+                reply_markup=get_owner_panel_keyboard()
             )
             return
         
@@ -3245,43 +3322,6 @@ def cancel(update: Update, context: CallbackContext):
 
 # ========== ГЛАВНАЯ ФУНКЦИЯ ==========
 
-def show_my_referrals(update, context, user_id):
-    """Показывает список рефералов с их статусом"""
-    pending = db.get_pending_referrals(user_id)
-    qualified = db.get_qualified_referrals(user_id)
-    
-    text = "👥 **Мои рефералы**\n\n"
-    
-    if qualified:
-        text += "✅ **Квалифицированные (2+ номеров):**\n"
-        for ref in qualified:
-            ref_user_id, username, first_name, date = ref
-            date_str = datetime.strptime(date, '%Y-%m-%d %H:%M:%S.%f').strftime('%d.%m.%Y')
-            username_display = f"@{username}" if username else first_name
-            text += f"• {username_display} - {date_str}\n"
-        text += "\n"
-    
-    if pending:
-        text += "⏳ **Ожидают квалификации:**\n"
-        for ref in pending:
-            ref_user_id, username, first_name, date = ref
-            date_str = datetime.strptime(date, '%Y-%m-%d %H:%M:%S.%f').strftime('%d.%m.%Y')
-            username_display = f"@{username}" if username else first_name
-            text += f"• {username_display} - {date_str}\n"
-        text += "\n"
-    
-    if not qualified and not pending:
-        text += "У вас пока нет рефералов.\n\n"
-        text += "Приглашайте друзей по вашей реферальной ссылке!"
-    
-    keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="menu_referrals")]]
-    
-    update.edit_message_text(
-        text,
-        parse_mode='Markdown',
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-
 def main():
     """Запуск бота"""
     updater = Updater(token=config.BOT_TOKEN, use_context=True)
@@ -3295,7 +3335,7 @@ def main():
         entry_points=[CallbackQueryHandler(handle_callback, pattern='^submit_whatsapp$')],
         states={
             WAITING_FOR_NUMBER: [MessageHandler(Filters.text & ~Filters.command, handle_whatsapp_number_input)],
-            WAITING_FOR_TYPE: [CallbackQueryHandler(handle_type_selection, pattern='^(type_code|type_qr|back_to_submit)$')]
+            WAITING_FOR_TYPE: [CallbackQueryHandler(handle_type_selection, pattern='^(type_code|type_qr|back_to_main)$')]
         },
         fallbacks=[CommandHandler('cancel', cancel)]
     )
