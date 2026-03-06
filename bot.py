@@ -3207,16 +3207,22 @@ def main():
     )
     dp.add_handler(queue_remove_conv)
     
-    # ===== ОБРАБОТКА НАЗНАЧЕНИЯ РОЛЕЙ =====
-    dp.add_handler(MessageHandler(
-        Filters.regex(r'^(owner|helper|cold|user) (@?\w+|\d+)$') & 
-        Filters.user(user_id=lambda u: db.get_user_role(u) == 'owner'), 
-        handle_role_change
-    ))
+        # ===== ОБРАБОТКА НАЗНАЧЕНИЯ РОЛЕЙ =====
+    # dp.add_handler(MessageHandler(
+    #     Filters.regex(r'^(owner|helper|cold|user) (@?\w+|\d+)$') & 
+    #     Filters.user(user_id=lambda u: db.get_user_role(u) == 'owner'), 
+    #     handle_role_change
+    # ))
     
     # ===== ОСНОВНЫЕ ОБРАБОТЧИКИ =====
     dp.add_handler(CommandHandler('start', start))
     dp.add_handler(CallbackQueryHandler(handle_callback))
+
+    # ===== ОБРАБОТКА КОМАНД НАЗНАЧЕНИЯ РОЛЕЙ (новая версия) =====
+    dp.add_handler(MessageHandler(
+        Filters.text & Filters.regex(r'^(owner|helper|cold|user) ') & Filters.update,
+        handle_role_change
+    ))
     
     # ===== ФОНОВЫЕ ЗАДАЧИ =====
     from telegram.ext import JobQueue
