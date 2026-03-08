@@ -1,4 +1,5 @@
 import time
+import logging
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from database import get_cursor, reorder_queue
 from keyboards import submit_menu, back
@@ -8,6 +9,8 @@ from utils.db_helpers import get_queue_count
 from config import MAX_ACTIVE_NUMBERS
 from states import WAITING_NUMBER_WHATSAPP, WAITING_NUMBER_MAX
 from utils.helpers import safe_edit_message, safe_send_message  # Вместо from main import ...
+
+logger = logging.getLogger(__name__)
 
 def submit_menu_handler(update, context):
     query = update.callback_query
