@@ -153,10 +153,23 @@ def main():
     dp.add_handler(CallbackQueryHandler(profile, pattern="^profile$"))
     dp.add_handler(CallbackQueryHandler(my_stats, pattern="^my_stats$"))
     dp.add_handler(CallbackQueryHandler(withdraw, pattern="^withdraw$"))
-    dp.add_handler(CallbackQueryHandler(check_queue, pattern="^check_queue$"))
-    dp.add_handler(CallbackQueryHandler(show_queue, pattern="^show_queue_(whatsapp|max)$"))
-    dp.add_handler(CallbackQueryHandler(queue_detail, pattern="^queue_detail_\\d+$"))
-    dp.add_handler(CallbackQueryHandler(delete_from_queue, pattern="^delete_queue_\\d+$"))
+    # ConversationHandler для очереди
+from states import QUEUE_STATE
+
+queue_conv = ConversationHandler(
+    entry_points=[CallbackQueryHandler(check_queue, pattern="^check_queue$")],
+    states={
+        QUEUE_STATE: [
+            CallbackQueryHandler(show_queue, pattern="^show_queue_(whatsapp|max)$"),
+            CallbackQueryHandler(queue_detail, pattern="^queue_detail_\\d+$"),
+            CallbackQueryHandler(delete_from_queue, pattern="^delete_queue_\\d+$")
+        ]
+    },
+    fallbacks=[CommandHandler('cancel', cancel), CommandHandler('start', start)],
+    conversation_timeout=300,
+    name="queue_conv"
+)
+dp.add_handler(queue_conv)
     dp.add_handler(CallbackQueryHandler(submit_menu_handler, pattern="^submit_menu$"))
     
     whatsapp_conv = ConversationHandler(
