@@ -104,25 +104,34 @@ def delete_from_queue(update, context):
     query = update.callback_query
     query.answer()
     
-    number_id = int(query.data.split("_")[2])
-    user_id = query.from_user.id
-    
-    with get_cursor(commit=True) as cur:
-        cur.execute("""
-        UPDATE numbers SET status='cancelled', in_queue=0, taken_by=NULL 
-        WHERE id=%s AND user_id=%s AND status='waiting'
-        RETURNING platform
-        """, (number_id, user_id))
+    try:
+        number_id = int(query.data.split("_")[2])
+        user_id = query.from_user.id
         
-        result = cur.fetchone()
-        
-        if result:
-            platform = result[0]
-            reorder_queue(platform)
-            logger.info(f"Number {number_id} deleted from queue by user {user_id}")
-            safe_edit_message(query, "✅ Номер удален из очереди.")
-        else:
-            safe_edit_message(query, "❌ Номер не найден или уже не в очереди.")
-    
-    # Возвращаемся к списку очереди
-    show_queue(update, context)
+        with get_cursor(commit=True) as cur:
+            cur.execute("""
+            UPDATE numbers SET status='cancelled', in_queue=0, taken_by=NULL 
+            WHERE id=%s AND user_id=%s AND status='waiting'
+            RETURNING platform
+            """, (number_id, user_id))
+            
+            result = cur.fetchone()
+            
+            if result:
+                platform = result[0]
+                from database import reorder_queue
+                reorder_queue(platform)
+                logger.info(f"Number {number_id} deleted from queue by user {user_id}")
+                
+                # Показываем сообщение об успехе
+                query.edit_message_text("✅ Номер успешно удален из очереди.")
+                
+                # Возвращаемся к списку очереди через 2 секунды
+                import time
+                time.sleep(2)
+                show_queue(update, context)
+            else:
+                query.edit_message_text("❌ Номер не найден или уже не в очереди.")
+    except Exception as e:
+        logger.error(f"Error deleting number: {e}")
+        query.edit_message_text("❌ Произошла ошибка при удалении.")
