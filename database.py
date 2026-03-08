@@ -71,7 +71,12 @@ class DatabasePool:
     @contextmanager
     def get_cursor(self, commit=False):
         with self.get_connection() as conn:
-            conn.autocommit = False
+            # Устанавливаем autocommit ТОЛЬКО если не в транзакции
+            try:
+                conn.autocommit = False
+            except psycopg2.ProgrammingError:
+                # Если уже в транзакции - игнорируем ошибку
+                pass
             cur = conn.cursor()
             try:
                 yield cur
