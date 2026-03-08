@@ -3,7 +3,7 @@ from database import get_cursor, reorder_queue
 from keyboards import back, queue_menu, number_detail_menu
 from datetime import datetime
 from config import TIMEZONE
-from main import safe_edit_message, safe_send_message
+from utils.helpers import safe_edit_message, safe_send_message  # Вместо from main import ...
 
 def check_queue(update, context):
     """Главное меню очереди"""

@@ -1,7 +1,7 @@
 import time
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from database import get_cursor
-from main import safe_send_message
+from utils.helpers import safe_send_message  # Вместо from main import ...
 
 def check_queue_job(context):
     now = int(time.time())

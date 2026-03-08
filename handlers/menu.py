@@ -1,7 +1,7 @@
 from keyboards import main_menu, back
 from utils.roles import get_role
 from config import SUPPORT, GROUP_LINK, REPUTATION_LINK, ADAPTER_LINK
-from main import safe_edit_message
+from utils.helpers import safe_edit_message
 
 def back_to_menu(update, context):
     query = update.callback_query

@@ -6,7 +6,7 @@ from database import get_cursor
 from keyboards import helper_panel_menu, back
 from utils.stats import generate_daily_stats
 from config import ALL_NUMBERS_PER_PAGE
-from main import safe_edit_message, safe_send_message
+from utils.helpers import safe_edit_message, safe_send_message  # Вместо from main import ...
 
 def helper_panel(update, context):
     query = update.callback_query

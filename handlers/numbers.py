@@ -1,7 +1,7 @@
 from database import get_cursor
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from keyboards import back
-from main import safe_edit_message
+from utils.helpers import safe_edit_message  # Вместо from main import ...
 
 def my_numbers(update, context):
     query = update.callback_query

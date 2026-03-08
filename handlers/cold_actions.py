@@ -5,7 +5,8 @@ from keyboards import back, status_buttons
 from config import MAX_RETRY_COUNT, EXTRA_REQUEST_COOLDOWN, MAX_ACTIVE_COLD
 from states import WAITING_EXTRA
 from utils.roles import get_role
-from main import safe_edit_message, safe_send_message, check_cooldown, update_cooldown
+from utils.helpers import safe_edit_message, safe_send_message 
+from main import check_cooldown, update_cooldown
 
 logger = logging.getLogger(__name__)
 

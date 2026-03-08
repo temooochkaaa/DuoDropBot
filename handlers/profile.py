@@ -9,7 +9,7 @@ from utils.referrals import get_referral_info
 from utils.roles import get_role
 from utils.stats import generate_user_stats
 from config import GROUP_LINK, REPUTATION_LINK, SUPPORT
-from main import safe_edit_message, safe_send_message
+from utils.helpers import safe_edit_message, safe_send_message  # Вместо from main import ...
 
 def profile(update, context):
     query = update.callback_query

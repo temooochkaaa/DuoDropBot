@@ -3,7 +3,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from database import get_cursor
 from keyboards import main_menu
 from config import OWNER_ID
-from main import safe_edit_message, safe_send_message
+from utils.helpers import safe_send_message  # Импортируем из helpers
 
 AGREEMENT_TEXT = """
 📋 **ПОЛЬЗОВАТЕЛЬСКОЕ СОГЛАШЕНИЕ**
@@ -23,7 +23,7 @@ def start(update, context):
     if context.args:
         try:
             ref = int(context.args[0])
-            if ref != user.id:  # Нельзя реферить самого себя
+            if ref != user.id:
                 with get_cursor(commit=True) as cur:
                     cur.execute("""
                     INSERT INTO referrals (referrer_id, referred_id, status)
@@ -79,6 +79,7 @@ def accept_agreement(update, context):
     from utils.roles import get_role
     role = get_role(query.from_user.id) or 'user'
     
+    from utils.helpers import safe_edit_message  # Импортируем из helpers
     safe_edit_message(
         query,
         "✅ Соглашение принято!",

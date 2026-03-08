@@ -5,7 +5,7 @@ from telegram.error import RetryAfter, TimedOut
 from database import get_cursor
 from keyboards import owner_panel_menu, back
 from config import BROADCAST_DELAY
-from main import safe_edit_message, safe_send_message
+from utils.helpers import safe_edit_message, safe_send_message  # Вместо from main import ...
 
 logger = logging.getLogger(__name__)
 

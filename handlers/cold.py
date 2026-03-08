@@ -3,7 +3,8 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from database import get_cursor, reorder_queue
 from keyboards import cold_panel_menu, back, number_actions_menu
 from config import GROUP_ID, NUMBERS_PER_PAGE, MAX_ACTIVE_COLD
-from main import safe_edit_message, safe_send_message, check_cooldown, update_cooldown
+from utils.helpers import safe_edit_message, safe_send_message 
+from main import check_cooldown, update_cooldown
 
 def cold_panel(update, context):
     query = update.callback_query
