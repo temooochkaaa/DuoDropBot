@@ -156,14 +156,14 @@ def delete_from_queue(update, context):
                 reorder_queue(platform)
                 logger.info(f"Number {number_id} deleted from queue by user {user_id}")
                 
-                # Удаляем старое сообщение и отправляем новое
-                query.message.delete()
+                # Показываем сообщение об успехе
+                query.edit_message_text("✅ Номер успешно удален из очереди.")
                 
-                # Возвращаемся в главное меню
+                # Отправляем новое сообщение с главным меню
                 role = get_role(user_id) or 'user'
                 context.bot.send_message(
                     chat_id=user_id,
-                    text="✅ Номер успешно удален из очереди.\n\nГлавное меню:",
+                    text="Главное меню:",
                     reply_markup=main_menu(role)
                 )
             else:
