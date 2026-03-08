@@ -1,5 +1,4 @@
 import logging
-import time
 from telegram.ext import (
     Updater, CommandHandler, MessageHandler, 
     CallbackQueryHandler, ConversationHandler, Filters
@@ -46,7 +45,8 @@ from utils.roles import get_role
 
 from states import (
     WAITING_NUMBER_WHATSAPP, WAITING_NUMBER_MAX, WAITING_PHOTO,
-    WAITING_EXTRA, WAITING_BROADCAST, WAITING_ROLE_ID, WAITING_REMOVE_ID
+    WAITING_EXTRA, WAITING_BROADCAST, WAITING_ROLE_ID, WAITING_REMOVE_ID,
+    QUEUE_STATE
 )
 
 
@@ -69,13 +69,16 @@ def error_handler(update, context):
     logger.error(f"Update {update} caused error {context.error}", exc_info=True)
     try:
         if update and update.effective_user and update.effective_user.id != OWNER_ID:
-            safe_send_message(context.bot, OWNER_ID, f"❌ **Ошибка бота**\n\n{context.error}")
+            context.bot.send_message(
+                OWNER_ID, 
+                f"❌ **Ошибка бота**\n\n{context.error}",
+                parse_mode='Markdown'
+            )
     except:
         pass
 
 
 def safe_edit_message(query, text, reply_markup=None):
-    """Безопасное редактирование сообщения с игнорированием ошибки Message is not modified"""
     try:
         if reply_markup:
             query.edit_message_text(text, parse_mode='Markdown', reply_markup=reply_markup)
@@ -87,7 +90,6 @@ def safe_edit_message(query, text, reply_markup=None):
 
 
 def safe_send_message(bot, chat_id, text, reply_markup=None, parse_mode='Markdown'):
-    """Безопасная отправка сообщения с try/except"""
     try:
         if reply_markup:
             bot.send_message(chat_id, text, parse_mode=parse_mode, reply_markup=reply_markup)
@@ -98,7 +100,6 @@ def safe_send_message(bot, chat_id, text, reply_markup=None, parse_mode='Markdow
 
 
 def check_cooldown(user_id, cooldown_type='button'):
-    """Проверка кулдауна для кнопок и запросов"""
     with get_cursor() as cur:
         cur.execute(f"SELECT last_{cooldown_type} FROM users WHERE id=%s", (user_id,))
         result = cur.fetchone()
@@ -115,7 +116,6 @@ def check_cooldown(user_id, cooldown_type='button'):
 
 
 def update_cooldown(user_id, cooldown_type='button'):
-    """Обновление времени последнего действия"""
     with get_cursor(commit=True) as cur:
         cur.execute(f"UPDATE users SET last_{cooldown_type}=%s WHERE id=%s", 
                    (int(time.time()), user_id))
@@ -153,43 +153,43 @@ def main():
     dp.add_handler(CallbackQueryHandler(profile, pattern="^profile$"))
     dp.add_handler(CallbackQueryHandler(my_stats, pattern="^my_stats$"))
     dp.add_handler(CallbackQueryHandler(withdraw, pattern="^withdraw$"))
+    
     # ConversationHandler для очереди
-from states import QUEUE_STATE
-
-queue_conv = ConversationHandler(
-    entry_points=[CallbackQueryHandler(check_queue, pattern="^check_queue$")],
-    states={
-        QUEUE_STATE: [
-            CallbackQueryHandler(show_queue, pattern="^show_queue_(whatsapp|max)$"),
-            CallbackQueryHandler(queue_detail, pattern="^queue_detail_\\d+$"),
-            CallbackQueryHandler(delete_from_queue, pattern="^delete_queue_\\d+$")
-        ]
-    },
-    fallbacks=[CommandHandler('cancel', cancel), CommandHandler('start', start)],
-    conversation_timeout=300,
-    name="queue_conv"
-)
-dp.add_handler(queue_conv)
-
-dp.add_handler(CallbackQueryHandler(submit_menu_handler, pattern="^submit_menu$"))
-
-whatsapp_conv = ConversationHandler(
-    entry_points=[CallbackQueryHandler(submit_whatsapp, pattern="^submit_whatsapp$")],
-    states={WAITING_NUMBER_WHATSAPP: [MessageHandler(Filters.text & ~Filters.command, process_whatsapp_number)]},
-    fallbacks=[CommandHandler('cancel', cancel), CommandHandler('start', cancel)],
-    conversation_timeout=300,
-    name="whatsapp_conv"
-)
-dp.add_handler(whatsapp_conv)
-
-max_conv = ConversationHandler(
-    entry_points=[CallbackQueryHandler(submit_max, pattern="^submit_max$")],
-    states={WAITING_NUMBER_MAX: [MessageHandler(Filters.text & ~Filters.command, process_max_number)]},
-    fallbacks=[CommandHandler('cancel', cancel), CommandHandler('start', cancel)],
-    conversation_timeout=300,
-    name="max_conv"
-)
-dp.add_handler(max_conv)    
+    queue_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(check_queue, pattern="^check_queue$")],
+        states={
+            QUEUE_STATE: [
+                CallbackQueryHandler(show_queue, pattern="^show_queue_(whatsapp|max)$"),
+                CallbackQueryHandler(queue_detail, pattern="^queue_detail_\\d+$"),
+                CallbackQueryHandler(delete_from_queue, pattern="^delete_queue_\\d+$")
+            ]
+        },
+        fallbacks=[CommandHandler('cancel', cancel), CommandHandler('start', start)],
+        conversation_timeout=300,
+        name="queue_conv"
+    )
+    dp.add_handler(queue_conv)
+    
+    dp.add_handler(CallbackQueryHandler(submit_menu_handler, pattern="^submit_menu$"))
+    
+    whatsapp_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(submit_whatsapp, pattern="^submit_whatsapp$")],
+        states={WAITING_NUMBER_WHATSAPP: [MessageHandler(Filters.text & ~Filters.command, process_whatsapp_number)]},
+        fallbacks=[CommandHandler('cancel', cancel), CommandHandler('start', cancel)],
+        conversation_timeout=300,
+        name="whatsapp_conv"
+    )
+    dp.add_handler(whatsapp_conv)
+    
+    max_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(submit_max, pattern="^submit_max$")],
+        states={WAITING_NUMBER_MAX: [MessageHandler(Filters.text & ~Filters.command, process_max_number)]},
+        fallbacks=[CommandHandler('cancel', cancel), CommandHandler('start', cancel)],
+        conversation_timeout=300,
+        name="max_conv"
+    )
+    dp.add_handler(max_conv)
+    
     dp.add_handler(CallbackQueryHandler(cold_panel, pattern="^cold_panel$"))
     dp.add_handler(CallbackQueryHandler(request_number, pattern="^request_number_(whatsapp|max)$"))
     dp.add_handler(CallbackQueryHandler(free_numbers, pattern="^free_numbers_(whatsapp|max)$"))
