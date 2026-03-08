@@ -165,6 +165,7 @@ def check_stale_numbers():
 @db_retry
 def init_db():
     with get_cursor(commit=True) as cur:
+        # Сначала создаем таблицу users (без индексов)
         cur.execute("""
         CREATE TABLE IF NOT EXISTS users (
             id BIGINT PRIMARY KEY,
@@ -175,12 +176,22 @@ def init_db():
             referral_count INTEGER DEFAULT 0,
             referral_balance REAL DEFAULT 0,
             accepted INTEGER DEFAULT 0,
-            created_at BIGINT,
-            last_button_click BIGINT DEFAULT 0,
-            last_request BIGINT DEFAULT 0
+            created_at BIGINT
         )
         """)
         
+        # Добавляем новые колонки, если их нет
+        try:
+            cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_button_click BIGINT DEFAULT 0")
+        except:
+            pass
+        
+        try:
+            cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_request BIGINT DEFAULT 0")
+        except:
+            pass
+        
+        # Создаем таблицу numbers
         cur.execute("""
         CREATE TABLE IF NOT EXISTS numbers (
             id SERIAL PRIMARY KEY,
@@ -211,6 +222,7 @@ def init_db():
         )
         """)
         
+        # Создаем таблицу referrals
         cur.execute("""
         CREATE TABLE IF NOT EXISTS referrals (
             id SERIAL PRIMARY KEY,
@@ -222,7 +234,7 @@ def init_db():
         )
         """)
         
-        # Индексы
+        # Индексы (создаем только после того, как убедились, что колонки существуют)
         cur.execute("CREATE INDEX IF NOT EXISTS idx_numbers_status ON numbers(status, taken_by)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_numbers_user ON numbers(user_id)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_numbers_queue ON numbers(queue_position)")
@@ -236,5 +248,6 @@ def init_db():
         cur.execute("CREATE INDEX IF NOT EXISTS idx_users_role ON users(role)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_users_referred ON users(referred_by)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_users_last_click ON users(last_button_click)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_users_last_request ON users(last_request)")
         
         logger.info("Database initialized successfully")
