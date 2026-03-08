@@ -1,4 +1,5 @@
 import time
+import logging
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from database import get_cursor, reorder_queue
 from keyboards import back, status_buttons
