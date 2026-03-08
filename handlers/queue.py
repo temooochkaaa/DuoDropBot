@@ -108,7 +108,8 @@ def delete_from_queue(update, context):
     query = update.callback_query
     query.answer()
     
-    logger.info(f"Delete function called by user {query.from_user.id}")
+    user_id = query.from_user.id
+    logger.info(f"Delete function called by user {user_id}")
     
     try:
         # Парсим ID номера
@@ -116,12 +117,13 @@ def delete_from_queue(update, context):
         logger.info(f"Callback data parts: {parts}")
         
         if len(parts) < 3:
-            logger.error(f"Invalid callback data: {query.data}")
-            query.edit_message_text("❌ Ошибка: неверный формат данных.")
+            context.bot.send_message(
+                chat_id=user_id,
+                text="❌ Ошибка: неверный формат данных."
+            )
             return
         
         number_id = int(parts[2])
-        user_id = query.from_user.id
         logger.info(f"Attempting to delete number {number_id} for user {user_id}")
         
         with get_cursor(commit=True) as cur:
@@ -135,8 +137,10 @@ def delete_from_queue(update, context):
             logger.info(f"Number check result: {result}")
             
             if not result:
-                logger.warning(f"Number {number_id} not found or not in waiting status")
-                query.edit_message_text("❌ Номер не найден или уже не в очереди.")
+                context.bot.send_message(
+                    chat_id=user_id,
+                    text="❌ Номер не найден или уже не в очереди."
+                )
                 return
             
             platform = result[1]
@@ -144,35 +148,38 @@ def delete_from_queue(update, context):
             # Удаляем номер
             cur.execute("""
             UPDATE numbers SET status='cancelled', in_queue=0, taken_by=NULL 
-            WHERE id=%s AND user_id=%s AND status='waiting'
+            WHERE id=%s AND user_id=%s
             """, (number_id, user_id))
             
-            deleted = cur.rowcount
-            logger.info(f"Deleted rows: {deleted}")
-            
-            if deleted > 0:
-                # Пересчитываем очередь
-                from database import reorder_queue
-                reorder_queue(platform)
-                logger.info(f"Number {number_id} deleted from queue by user {user_id}")
-                
-                # Показываем сообщение об успехе
-                query.edit_message_text("✅ Номер успешно удален из очереди.")
-                
-                # Отправляем новое сообщение с главным меню
-                role = get_role(user_id) or 'user'
+            if cur.rowcount == 0:
                 context.bot.send_message(
                     chat_id=user_id,
-                    text="Главное меню:",
-                    reply_markup=main_menu(role)
+                    text="❌ Не удалось удалить номер."
                 )
-            else:
-                logger.warning(f"No rows deleted for number {number_id}")
-                query.edit_message_text("❌ Не удалось удалить номер.")
+                return
+            
+            # Пересчитываем очередь
+            from database import reorder_queue
+            reorder_queue(platform)
+            logger.info(f"Number {number_id} deleted from queue by user {user_id}")
+        
+        # Удаляем старое сообщение
+        try:
+            query.message.delete()
+        except Exception as e:
+            logger.warning(f"Could not delete message: {e}")
+        
+        # Отправляем новое сообщение с главным меню
+        role = get_role(user_id) or 'user'
+        context.bot.send_message(
+            chat_id=user_id,
+            text="✅ Номер успешно удален из очереди.\n\nГлавное меню:",
+            reply_markup=main_menu(role)
+        )
                 
-    except ValueError as e:
-        logger.error(f"Value error parsing number ID: {e}")
-        query.edit_message_text("❌ Ошибка: неверный ID номера.")
     except Exception as e:
-        logger.error(f"Unexpected error deleting number: {e}", exc_info=True)
-        query.edit_message_text("❌ Произошла внутренняя ошибка.")
+        logger.error(f"Delete queue error: {e}", exc_info=True)
+        context.bot.send_message(
+            chat_id=user_id,
+            text="❌ Произошла ошибка при удалении номера."
+        )
