@@ -1,11 +1,13 @@
 import logging
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import ConversationHandler
 from database import get_cursor, reorder_queue
 from keyboards import back, queue_menu, number_detail_menu, main_menu
 from datetime import datetime
 from config import TIMEZONE
-from utils.helpers import safe_edit_message, safe_send_message
+from utils.helpers import safe_edit_message
 from utils.roles import get_role
+from states import QUEUE_STATE  # Добавлено
 
 logger = logging.getLogger(__name__)
 
@@ -18,6 +20,7 @@ def check_queue(update, context):
         "📊 Выберите очередь:",
         reply_markup=queue_menu()
     )
+    return QUEUE_STATE  # Исправлено
 
 def show_queue(update, context):
     """Показать очередь для конкретной платформы"""
@@ -28,7 +31,6 @@ def show_queue(update, context):
     user_id = query.from_user.id
     
     with get_cursor() as cur:
-        # Используем ROW_NUMBER для отображения порядкового номера
         cur.execute("""
         SELECT id, phone, queue_position, created_at,
                ROW_NUMBER() OVER (ORDER BY queue_position) as row_num
@@ -45,7 +47,7 @@ def show_queue(update, context):
             f"📭 У вас нет номеров в очереди {platform.upper()}.",
             reply_markup=back("check_queue")
         )
-        return
+        return QUEUE_STATE  # Исправлено
     
     text = f"📊 **Очередь {platform.upper()}:**\n\n"
     buttons = []
@@ -65,6 +67,7 @@ def show_queue(update, context):
         text,
         reply_markup=InlineKeyboardMarkup(buttons)
     )
+    return QUEUE_STATE  # Исправлено
 
 def queue_detail(update, context):
     """Детальная информация о номере в очереди"""
@@ -84,7 +87,7 @@ def queue_detail(update, context):
         
         if not result:
             safe_edit_message(query, "❌ Номер не найден.")
-            return
+            return QUEUE_STATE  # Исправлено
         
         phone, platform, position, created = result
         created_time = datetime.fromtimestamp(created, TIMEZONE).strftime('%d.%m.%Y %H:%M:%S')
@@ -102,6 +105,7 @@ def queue_detail(update, context):
             text,
             reply_markup=number_detail_menu(number_id)
         )
+    return QUEUE_STATE  # Исправлено
 
 def delete_from_queue(update, context):
     """Удалить номер из очереди"""
@@ -112,7 +116,6 @@ def delete_from_queue(update, context):
     logger.info(f"Delete function called by user {user_id}")
     
     try:
-        # Парсим ID номера
         parts = query.data.split("_")
         logger.info(f"Callback data parts: {parts}")
         
@@ -121,15 +124,14 @@ def delete_from_queue(update, context):
                 chat_id=user_id,
                 text="❌ Ошибка: неверный формат данных."
             )
-            return
+            return ConversationHandler.END
         
         number_id = int(parts[2])
         logger.info(f"Attempting to delete number {number_id} for user {user_id}")
         
         with get_cursor(commit=True) as cur:
-            # Проверяем, существует ли номер и принадлежит ли пользователю
             cur.execute("""
-            SELECT id, platform FROM numbers 
+            SELECT platform FROM numbers 
             WHERE id=%s AND user_id=%s AND status='waiting'
             """, (number_id, user_id))
             
@@ -141,11 +143,10 @@ def delete_from_queue(update, context):
                     chat_id=user_id,
                     text="❌ Номер не найден или уже не в очереди."
                 )
-                return
+                return ConversationHandler.END
             
-            platform = result[1]
+            platform = result[0]
             
-            # Удаляем номер
             cur.execute("""
             UPDATE numbers SET status='cancelled', in_queue=0, taken_by=NULL 
             WHERE id=%s AND user_id=%s
@@ -156,26 +157,25 @@ def delete_from_queue(update, context):
                     chat_id=user_id,
                     text="❌ Не удалось удалить номер."
                 )
-                return
+                return ConversationHandler.END
             
-            # Пересчитываем очередь
             from database import reorder_queue
             reorder_queue(platform)
             logger.info(f"Number {number_id} deleted from queue by user {user_id}")
         
-        # Удаляем старое сообщение
         try:
             query.message.delete()
         except Exception as e:
             logger.warning(f"Could not delete message: {e}")
         
-        # Отправляем новое сообщение с главным меню
         role = get_role(user_id) or 'user'
         context.bot.send_message(
             chat_id=user_id,
             text="✅ Номер успешно удален из очереди.\n\nГлавное меню:",
             reply_markup=main_menu(role)
         )
+        
+        return ConversationHandler.END
                 
     except Exception as e:
         logger.error(f"Delete queue error: {e}", exc_info=True)
@@ -183,3 +183,4 @@ def delete_from_queue(update, context):
             chat_id=user_id,
             text="❌ Произошла ошибка при удалении номера."
         )
+        return ConversationHandler.END
