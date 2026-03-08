@@ -172,25 +172,24 @@ queue_conv = ConversationHandler(
 dp.add_handler(queue_conv)
 
 dp.add_handler(CallbackQueryHandler(submit_menu_handler, pattern="^submit_menu$"))
-    
-    whatsapp_conv = ConversationHandler(
-        entry_points=[CallbackQueryHandler(submit_whatsapp, pattern="^submit_whatsapp$")],
-        states={WAITING_NUMBER_WHATSAPP: [MessageHandler(Filters.text & ~Filters.command, process_whatsapp_number)]},
-        fallbacks=[CommandHandler('cancel', cancel), CommandHandler('start', cancel)],
-        conversation_timeout=300,
-        name="whatsapp_conv"
-    )
-    dp.add_handler(whatsapp_conv)
-    
-    max_conv = ConversationHandler(
-        entry_points=[CallbackQueryHandler(submit_max, pattern="^submit_max$")],
-        states={WAITING_NUMBER_MAX: [MessageHandler(Filters.text & ~Filters.command, process_max_number)]},
-        fallbacks=[CommandHandler('cancel', cancel), CommandHandler('start', cancel)],
-        conversation_timeout=300,
-        name="max_conv"
-    )
-    dp.add_handler(max_conv)
-    
+
+whatsapp_conv = ConversationHandler(
+    entry_points=[CallbackQueryHandler(submit_whatsapp, pattern="^submit_whatsapp$")],
+    states={WAITING_NUMBER_WHATSAPP: [MessageHandler(Filters.text & ~Filters.command, process_whatsapp_number)]},
+    fallbacks=[CommandHandler('cancel', cancel), CommandHandler('start', cancel)],
+    conversation_timeout=300,
+    name="whatsapp_conv"
+)
+dp.add_handler(whatsapp_conv)
+
+max_conv = ConversationHandler(
+    entry_points=[CallbackQueryHandler(submit_max, pattern="^submit_max$")],
+    states={WAITING_NUMBER_MAX: [MessageHandler(Filters.text & ~Filters.command, process_max_number)]},
+    fallbacks=[CommandHandler('cancel', cancel), CommandHandler('start', cancel)],
+    conversation_timeout=300,
+    name="max_conv"
+)
+dp.add_handler(max_conv)    
     dp.add_handler(CallbackQueryHandler(cold_panel, pattern="^cold_panel$"))
     dp.add_handler(CallbackQueryHandler(request_number, pattern="^request_number_(whatsapp|max)$"))
     dp.add_handler(CallbackQueryHandler(free_numbers, pattern="^free_numbers_(whatsapp|max)$"))
