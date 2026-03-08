@@ -172,22 +172,18 @@ def main():
     dp.add_handler(CallbackQueryHandler(withdraw, pattern="^withdraw$"))
     
     # ConversationHandler для очереди
-    queue_conv = ConversationHandler(
-        entry_points=[CallbackQueryHandler(check_queue, pattern="^check_queue$")],
-        states={
-            QUEUE_STATE: [
-                CallbackQueryHandler(show_queue, pattern="^show_queue_(whatsapp|max)$"),
-                CallbackQueryHandler(queue_detail, pattern="^queue_detail_\\d+$"),
-                CallbackQueryHandler(delete_from_queue, pattern="^delete_queue_\\d+$")
-            ]
-        },
-        fallbacks=[CommandHandler('cancel', cancel), CommandHandler('start', start)],
-        conversation_timeout=300,
-        name="queue_conv"
-    )
-    dp.add_handler(queue_conv)
+    dp.add_handler(CallbackQueryHandler(check_queue, pattern="^check_queue$"))
+dp.add_handler(CallbackQueryHandler(show_queue, pattern="^show_queue_"))
+dp.add_handler(CallbackQueryHandler(queue_detail, pattern="^queue_detail_"))
+dp.add_handler(CallbackQueryHandler(delete_from_queue, pattern="^delete_queue_"))
     
     dp.add_handler(CallbackQueryHandler(submit_menu_handler, pattern="^submit_menu$"))
+
+dp.add_handler(
+    CallbackQueryHandler(
+        lambda update, context: update.callback_query.answer("⚠️ Кнопка устарела")
+    )
+)
     
     whatsapp_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(submit_whatsapp, pattern="^submit_whatsapp$")],
