@@ -1,4 +1,6 @@
 import logging
+import requests
+import time
 from telegram.ext import (
     Updater, CommandHandler, MessageHandler, 
     CallbackQueryHandler, ConversationHandler, Filters
@@ -48,6 +50,18 @@ from states import (
     WAITING_EXTRA, WAITING_BROADCAST, WAITING_ROLE_ID, WAITING_REMOVE_ID,
     QUEUE_STATE
 )
+
+
+def force_delete_webhook():
+    """Принудительное удаление вебхука перед запуском"""
+    for i in range(3):
+        try:
+            url = f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook"
+            response = requests.get(url)
+            logger.info(f"Delete webhook attempt {i+1}: {response.json()}")
+            time.sleep(1)
+        except Exception as e:
+            logger.error(f"Error deleting webhook: {e}")
 
 
 def cancel(update, context):
@@ -135,6 +149,9 @@ def cleanup_job(context):
 
 
 def main():
+    # Принудительно удаляем вебхук перед запуском
+    force_delete_webhook()
+    
     init_db()
     reorder_queue()
     logger.info("Database initialized and queue reordered")
