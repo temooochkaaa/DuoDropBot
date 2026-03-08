@@ -4,11 +4,12 @@ import time
 from datetime import datetime
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from database import get_cursor
-from keyboards import back
+from keyboards import back, profile_menu
 from utils.referrals import get_referral_info
 from utils.roles import get_role
 from utils.stats import generate_user_stats
-from config import GROUP_LINK, REPUTATION_LINK
+from config import GROUP_LINK, REPUTATION_LINK, SUPPORT
+from main import safe_edit_message, safe_send_message
 
 def profile(update, context):
     query = update.callback_query
@@ -22,7 +23,7 @@ def profile(update, context):
         user = cur.fetchone()
     
     if not user:
-        query.edit_message_text("❌ Пользователь не найден.")
+        safe_edit_message(query, "❌ Пользователь не найден.")
         return
     
     ref_info = get_referral_info(user_id)
@@ -44,16 +45,10 @@ def profile(update, context):
         f"⭐ **Репутация:** [ссылка]({REPUTATION_LINK})"
     )
     
-    buttons = [
-        [InlineKeyboardButton("📊 Моя статистика", callback_data="my_stats")],
-        [InlineKeyboardButton("⬅ Назад", callback_data="menu")]
-    ]
-    
-    query.edit_message_text(
+    safe_edit_message(
+        query,
         text,
-        parse_mode='Markdown',
-        disable_web_page_preview=True,
-        reply_markup=InlineKeyboardMarkup(buttons)
+        reply_markup=profile_menu()
     )
 
 def my_stats(update, context):
@@ -67,13 +62,16 @@ def my_stats(update, context):
         f.write(stats_text)
         tmp_path = f.name
     
-    with open(tmp_path, 'rb') as f:
-        context.bot.send_document(
-            chat_id=user_id,
-            document=f,
-            filename=f"stats_{user_id}_{int(time.time())}.txt",
-            caption="📊 Ваша статистика"
-        )
+    try:
+        with open(tmp_path, 'rb') as f:
+            context.bot.send_document(
+                chat_id=user_id,
+                document=f,
+                filename=f"stats_{user_id}_{int(time.time())}.txt",
+                caption="📊 Ваша статистика"
+            )
+    except Exception as e:
+        logger.error(f"Error sending stats: {e}")
     
     time.sleep(1)
     try:
@@ -81,7 +79,46 @@ def my_stats(update, context):
     except:
         pass
     
-    query.message.reply_text(
+    safe_send_message(
+        context.bot, user_id,
         "📊 Статистика отправлена.",
         reply_markup=back("profile")
     )
+
+def withdraw(update, context):
+    """Вывод реферального баланса"""
+    query = update.callback_query
+    query.answer()
+    user_id = query.from_user.id
+    
+    ref_info = get_referral_info(user_id)
+    balance = ref_info[1] if ref_info else 0
+    
+    if balance < 5:
+        safe_edit_message(
+            query,
+            f"❌ Минимальная сумма для вывода: 5$\nВаш баланс: ${balance:.2f}",
+            reply_markup=back("profile")
+        )
+        return
+    
+    # Отправляем уведомление в поддержку
+    from config import SUPPORT, OWNER_ID
+    text = (
+        f"💰 **Запрос на вывод средств**\n\n"
+        f"👤 Пользователь: @{query.from_user.username or 'нет'}\n"
+        f"🆔 ID: `{user_id}`\n"
+        f"💵 Сумма: ${balance:.2f}\n\n"
+        f"Контакты: {SUPPORT}"
+    )
+    
+    safe_send_message(context.bot, OWNER_ID, text)
+    
+    safe_edit_message(
+        query,
+        f"✅ Запрос на вывод ${balance:.2f} отправлен!\n"
+        f"Ожидайте, с вами свяжется {SUPPORT}",
+        reply_markup=back("profile")
+    )
+    
+    logger.info(f"Withdrawal request: user {user_id}, amount ${balance}")

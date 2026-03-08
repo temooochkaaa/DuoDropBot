@@ -1,6 +1,7 @@
 import time
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from database import get_cursor
+from main import safe_send_message
 
 def check_queue_job(context):
     now = int(time.time())
@@ -29,19 +30,16 @@ def check_queue_job(context):
                     InlineKeyboardButton(f"❌ Убрать #{nid}", callback_data=f"remove_{nid}")
                 ])
             
-            try:
-                context.bot.send_message(
-                    user_id,
-                    text,
-                    reply_markup=InlineKeyboardMarkup(buttons)
-                )
-                
-                cur.execute("""
-                UPDATE numbers SET last_queue_notification=%s 
-                WHERE id = ANY(%s)
-                """, (now, ids))
-            except Exception as e:
-                print(f"Error sending queue notification: {e}")
+            safe_send_message(
+                context.bot, user_id,
+                text,
+                reply_markup=InlineKeyboardMarkup(buttons)
+            )
+            
+            cur.execute("""
+            UPDATE numbers SET last_queue_notification=%s 
+            WHERE id = ANY(%s)
+            """, (now, ids))
 
 def queue_action(update, context):
     query = update.callback_query
@@ -57,22 +55,23 @@ def queue_action(update, context):
         result = cur.fetchone()
         
         if not result:
-            query.edit_message_text("❌ Номер не найден.")
+            safe_edit_message(query, "❌ Номер не найден.")
             return
         
         platform, taken_by = result
         
         if taken_by is not None:
-            query.edit_message_text("❌ Номер уже взят холодкой и не может быть удален.")
+            safe_edit_message(query, "❌ Номер уже взят холодкой и не может быть удален.")
             return
         
         if action == "remove":
             cur.execute("""
             UPDATE numbers SET status='cancelled', in_queue=0, taken_by=NULL WHERE id=%s AND user_id=%s
             """, (number_id, user_id))
-            query.edit_message_text("❌ Номер убран из очереди.")
+            safe_edit_message(query, "❌ Номер убран из очереди.")
             
             from database import reorder_queue
             reorder_queue(platform)
+            logger.info(f"Number {number_id} removed from queue by user {user_id}")
         else:
-            query.edit_message_text("✅ Номер остаётся в очереди.")
+            safe_edit_message(query, "✅ Номер остаётся в очереди.")

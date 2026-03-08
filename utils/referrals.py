@@ -25,11 +25,10 @@ def check_referral(user_id):
         
         if count >= 2:
             cur.execute("""
-            INSERT INTO referrals (referrer_id, referred_id, status, qualified_date)
-            VALUES (%s, %s, 'qualified', %s)
-            ON CONFLICT (referrer_id, referred_id) 
-            DO UPDATE SET status='qualified', qualified_date=%s
-            """, (referrer_id, user_id, int(time.time()), int(time.time())))
+            UPDATE referrals 
+            SET status='qualified', qualified_date=%s
+            WHERE referrer_id=%s AND referred_id=%s
+            """, (int(time.time()), referrer_id, user_id))
             
             cur.execute("""
             UPDATE users 
@@ -37,6 +36,8 @@ def check_referral(user_id):
                 referral_balance = referral_balance + 1
             WHERE id=%s
             """, (referrer_id,))
+            
+            logger.info(f"Referral qualified: {user_id} referred by {referrer_id}")
 
 def get_referral_info(user_id):
     with get_cursor() as cur:

@@ -5,15 +5,16 @@ from telegram.error import RetryAfter, TimedOut
 from database import get_cursor
 from keyboards import owner_panel_menu, back
 from config import BROADCAST_DELAY
+from main import safe_edit_message, safe_send_message
 
 logger = logging.getLogger(__name__)
 
 def owner_panel(update, context):
     query = update.callback_query
     query.answer()
-    query.edit_message_text(
+    safe_edit_message(
+        query,
         "👑 **Панель владельца**",
-        parse_mode='Markdown',
         reply_markup=owner_panel_menu()
     )
 
@@ -70,9 +71,9 @@ def owner_stats(update, context):
         [InlineKeyboardButton("🔙 Назад", callback_data="owner_panel")]
     ]
     
-    query.edit_message_text(
+    safe_edit_message(
+        query,
         text,
-        parse_mode='Markdown',
         reply_markup=InlineKeyboardMarkup(buttons)
     )
 
@@ -91,9 +92,9 @@ def manage_roles(update, context):
     
     text += "\n📝 **Изменить роль:**\n`роль ID`\nПример: `cold 123456789`\n\nДоступные роли: `owner`, `helper`, `cold`, `user`"
     
-    query.edit_message_text(
+    safe_edit_message(
+        query,
         text,
-        parse_mode='Markdown',
         reply_markup=back("owner_panel")
     )
     
@@ -101,45 +102,65 @@ def manage_roles(update, context):
     return WAITING_ROLE_ID
 
 def process_role_change(update, context):
+    if not update.message:
+        return -1
+        
     try:
         text = update.message.text.strip().split()
         if len(text) != 2:
-            update.message.reply_text("❌ Формат: роль ID")
+            safe_send_message(
+                context.bot, update.effective_chat.id,
+                "❌ Формат: роль ID"
+            )
             return -1
         
         role = text[0].lower()
         user_id = int(text[1])
         
         if role not in ['owner', 'helper', 'cold', 'user']:
-            update.message.reply_text("❌ Неверная роль. Доступны: owner, helper, cold, user")
+            safe_send_message(
+                context.bot, update.effective_chat.id,
+                "❌ Неверная роль. Доступны: owner, helper, cold, user"
+            )
             return -1
         
         with get_cursor(commit=True) as cur:
             cur.execute("UPDATE users SET role=%s WHERE id=%s", (role, user_id))
+            logger.info(f"Role changed: user {user_id} -> {role} by {update.effective_user.id}")
         
         try:
             from keyboards import main_menu
-            context.bot.send_message(
-                user_id,
+            safe_send_message(
+                context.bot, user_id,
                 f"🔄 Ваша роль изменена на {role}",
                 reply_markup=main_menu(role)
             )
         except:
             pass
         
-        update.message.reply_text(f"✅ Роль {user_id} изменена на {role}")
+        safe_send_message(
+            context.bot, update.effective_chat.id,
+            f"✅ Роль {user_id} изменена на {role}"
+        )
         
     except ValueError:
-        update.message.reply_text("❌ Неверный ID. Введите число.")
+        safe_send_message(
+            context.bot, update.effective_chat.id,
+            "❌ Неверный ID. Введите число."
+        )
     except Exception as e:
-        update.message.reply_text(f"❌ Ошибка: {e}")
+        safe_send_message(
+            context.bot, update.effective_chat.id,
+            f"❌ Ошибка: {e}"
+        )
     
     return -1
 
 def broadcast_start(update, context):
     query = update.callback_query
     query.answer()
-    query.edit_message_text(
+    safe_edit_message(
+        query,
         "📢 Введите сообщение для рассылки всем пользователям:",
         reply_markup=back("owner_panel")
     )
@@ -147,6 +168,9 @@ def broadcast_start(update, context):
     return WAITING_BROADCAST
 
 def broadcast_process(update, context):
+    if not update.message:
+        return -1
+        
     text = update.message.text
     
     with get_cursor() as cur:
@@ -154,7 +178,10 @@ def broadcast_process(update, context):
         users = cur.fetchall()
     
     if not users:
-        update.message.reply_text("📭 Нет пользователей для рассылки.")
+        safe_send_message(
+            context.bot, update.effective_chat.id,
+            "📭 Нет пользователей для рассылки."
+        )
         return -1
     
     sent = 0
@@ -165,10 +192,9 @@ def broadcast_process(update, context):
         retries = 3
         while retries > 0:
             try:
-                context.bot.send_message(
-                    u[0],
-                    f"📢 **Сообщение от администрации:**\n\n{text}",
-                    parse_mode='Markdown'
+                safe_send_message(
+                    context.bot, u[0],
+                    f"📢 **Сообщение от администрации:**\n\n{text}"
                 )
                 sent += 1
                 time.sleep(BROADCAST_DELAY)
@@ -196,9 +222,9 @@ def broadcast_process(update, context):
         f"⏱ Время: {elapsed:.1f} сек"
     )
     
-    update.message.reply_text(
+    safe_send_message(
+        context.bot, update.effective_chat.id,
         result_text,
-        parse_mode='Markdown',
         reply_markup=back("owner_panel")
     )
     

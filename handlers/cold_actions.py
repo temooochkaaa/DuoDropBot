@@ -2,21 +2,27 @@ import time
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from database import get_cursor, reorder_queue
 from keyboards import back, status_buttons
-from config import MAX_RETRY_COUNT
+from config import MAX_RETRY_COUNT, EXTRA_REQUEST_COOLDOWN, MAX_ACTIVE_COLD
 from states import WAITING_EXTRA
 from utils.roles import get_role
+from main import safe_edit_message, safe_send_message, check_cooldown, update_cooldown
+
+logger = logging.getLogger(__name__)
 
 def role_required(required_roles):
     def decorator(func):
         def wrapper(update, context, *args, **kwargs):
             user_id = update.effective_user.id
-            role = get_role(user_id)
+            role = get_role(user_id) or 'user'
             
             if role not in required_roles:
                 if hasattr(update, 'callback_query') and update.callback_query:
                     update.callback_query.answer("❌ У вас нет прав для этого действия", show_alert=True)
                 elif hasattr(update, 'message') and update.message:
-                    update.message.reply_text("❌ У вас нет прав для этого действия.")
+                    safe_send_message(
+                        context.bot, update.effective_chat.id,
+                        "❌ У вас нет прав для этого действия."
+                    )
                 return None
             return func(update, context, *args, **kwargs)
         return wrapper
@@ -24,24 +30,42 @@ def role_required(required_roles):
 
 @role_required(['cold', 'helper', 'owner'])
 def receive_photo(update, context):
+    # Проверяем, что это фото
+    if not update.message or not update.message.photo:
+        safe_send_message(
+            context.bot, update.effective_chat.id,
+            "❌ Отправьте фото, а не файл."
+        )
+        return -1
+    
     user_id = update.effective_user.id
     number_id = context.user_data.get('current_number')
     request_type = context.user_data.get('request_type')
     
     if not number_id:
-        update.message.reply_text("❌ Ошибка: номер не найден.")
+        safe_send_message(
+            context.bot, update.effective_chat.id,
+            "❌ Ошибка: номер не найден."
+        )
         return -1
     
+    # Проверяем статус
     with get_cursor() as cur:
         cur.execute("SELECT taken_by, status FROM numbers WHERE id=%s", (number_id,))
         result = cur.fetchone()
         
         if not result or result[0] != user_id:
-            update.message.reply_text("❌ Вы не можете отправить фото для этого номера.")
+            safe_send_message(
+                context.bot, update.effective_chat.id,
+                "❌ Вы не можете отправить фото для этого номера."
+            )
             return -1
         
         if result[1] != 'in_progress':
-            update.message.reply_text("❌ Номер уже не в статусе ожидания кода.")
+            safe_send_message(
+                context.bot, update.effective_chat.id,
+                "❌ Номер уже не в статусе ожидания кода."
+            )
             return -1
     
     photo = update.message.photo[-1]
@@ -59,26 +83,36 @@ def receive_photo(update, context):
         result = cur.fetchone()
         
         if not result:
-            update.message.reply_text("❌ Не удалось отправить фото.")
+            safe_send_message(
+                context.bot, update.effective_chat.id,
+                "❌ Не удалось отправить фото."
+            )
             return -1
         
         target_user, phone = result
+        logger.info(f"Photo sent for number {number_id} to user {target_user}")
     
     caption = f"📷 Код для {phone}\n\nНажмите 'Код введен' после использования."
-    context.bot.send_photo(
-        chat_id=target_user,
-        photo=photo_id,
-        caption=caption,
-        reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton("✅ Код введен", callback_data=f"code_entered_{number_id}")
-        ]])
-    )
     
-    update.message.reply_text(
+    try:
+        context.bot.send_photo(
+            chat_id=target_user,
+            photo=photo_id,
+            caption=caption,
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("✅ Код введен", callback_data=f"code_entered_{number_id}")
+            ]])
+        )
+    except Exception as e:
+        logger.error(f"Error sending photo: {e}")
+    
+    safe_send_message(
+        context.bot, update.effective_chat.id,
         "✅ Код отправлен пользователю!",
         reply_markup=back("my_numbers")
     )
     
+    # Очищаем временные данные
     context.user_data.pop('current_number', None)
     context.user_data.pop('request_type', None)
     return -1
@@ -100,39 +134,56 @@ def code_entered(update, context):
         result = cur.fetchone()
         
         if not result:
-            query.edit_message_text("❌ Номер не найден или не в статусе отправки кода.")
+            safe_edit_message(query, "❌ Номер не найден или не в статусе отправки кода.")
             return
         
         cold_id, phone = result
+        logger.info(f"Code entered for number {number_id} by user {user_id}")
     
     if cold_id:
-        context.bot.send_message(
-            cold_id,
+        safe_send_message(
+            context.bot, cold_id,
             f"🔔 Пользователь подтвердил ввод кода для {phone}\n\nТеперь можно проверить активацию.",
-            reply_markup=status_buttons(number_id, 'whatsapp')
+            reply_markup=status_buttons(number_id)
         )
     
-    query.edit_message_text("✅ Код подтвержден! Ожидайте активации.")
+    safe_edit_message(query, "✅ Код подтвержден! Ожидайте активации.")
 
+@role_required(['cold', 'helper', 'owner'])
 def set_status(update, context):
     query = update.callback_query
     query.answer()
     
     data = query.data.split("_")
-    status = data[0]
+    status = data[0]  # activate, fail, crashed
     number_id = int(data[1])
     cold_id = query.from_user.id
     now = int(time.time())
     
-    with get_cursor(commit=True) as cur:  # Добавлен commit=True
-        cur.execute("SELECT * FROM numbers WHERE id=%s AND taken_by=%s", (number_id, cold_id))
+    with get_cursor(commit=True) as cur:
+        # Проверяем, что номер принадлежит этой холодке
+        cur.execute("SELECT status, platform FROM numbers WHERE id=%s AND taken_by=%s", (number_id, cold_id))
         number = cur.fetchone()
         
         if not number:
-            query.edit_message_text("❌ Номер не найден или вы не работаете с ним.")
+            safe_edit_message(query, "❌ Номер не найден или вы не работаете с ним.")
             return
         
-        if status == 'activated':
+        current_status, platform = number
+        
+        # Проверяем допустимость перехода статуса
+        valid_transitions = {
+            'code_entered': ['activate', 'fail'],
+            'activated': ['crashed'],
+            'in_progress': ['activate', 'fail'],
+            'code_sent': ['activate', 'fail']
+        }
+        
+        if status not in valid_transitions.get(current_status, []):
+            safe_edit_message(query, f"❌ Нельзя перейти из {current_status} в {status}.")
+            return
+        
+        if status == 'activate':
             cur.execute("""
             UPDATE numbers SET activated_at=%s, status='activated' 
             WHERE id=%s AND taken_by=%s
@@ -142,10 +193,10 @@ def set_status(update, context):
             result = cur.fetchone()
             if result:
                 user_id, phone = result
-                context.bot.send_message(user_id, f"✅ Номер {phone} успешно активирован!")
-                reorder_queue()
-            
-        elif status == 'failed':
+                safe_send_message(context.bot, user_id, f"✅ Номер {phone} успешно активирован!")
+                logger.info(f"Number {number_id} activated by cold {cold_id}")
+                
+        elif status == 'fail':
             cur.execute("""
             UPDATE numbers SET taken_by=NULL, status='failed' 
             WHERE id=%s AND taken_by=%s
@@ -155,15 +206,16 @@ def set_status(update, context):
             result = cur.fetchone()
             if result:
                 user_id, phone = result
-                context.bot.send_message(
-                    user_id,
+                safe_send_message(
+                    context.bot, user_id,
                     f"❌ Номер {phone} не удалось активировать.\nХотите попробовать снова?",
                     reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("🔄 Повторить", callback_data=f"retry_{number_id}"),
-                         InlineKeyboardButton("❌ Отменить", callback_data=f"cancel_{number_id}")]
+                        [InlineKeyboardButton("🔄 Повторить", callback_data=f"retry_number_{number_id}"),
+                         InlineKeyboardButton("❌ Отменить", callback_data=f"cancel_number_{number_id}")]
                     ])
                 )
-                reorder_queue()
+                reorder_queue(platform)
+                logger.info(f"Number {number_id} failed by cold {cold_id}")
             
         elif status == 'crashed':
             cur.execute("""
@@ -185,18 +237,23 @@ def set_status(update, context):
                 
                 hours = work_time // 3600
                 minutes = (work_time % 3600) // 60
-                context.bot.send_message(
-                    user_id,
+                safe_send_message(
+                    context.bot, user_id,
                     f"💥 Номер {phone} слетел!\nПроработал: {hours}ч {minutes}мин"
                 )
-                reorder_queue()
+                reorder_queue(platform)
+                logger.info(f"Number {number_id} crashed, worked {work_time}s")
     
-    query.edit_message_text(f"✅ Статус обновлен: {status}")
+    safe_edit_message(query, f"✅ Статус обновлен: {status}")
+    
+    # Очищаем временные данные
+    context.user_data.pop('current_number', None)
+    context.user_data.pop('request_type', None)
 
 def retry_number(update, context):
     query = update.callback_query
     query.answer()
-    number_id = int(query.data.split("_")[1])
+    number_id = int(query.data.split("_")[2])
     user_id = query.from_user.id
     
     with get_cursor(commit=True) as cur:
@@ -204,25 +261,27 @@ def retry_number(update, context):
         result = cur.fetchone()
         
         if not result:
-            query.edit_message_text("❌ Номер не найден.")
+            safe_edit_message(query, "❌ Номер не найден.")
             return
         
         retries, platform = result
         
         if retries >= MAX_RETRY_COUNT:
             cur.execute("UPDATE numbers SET status='failed', taken_by=NULL WHERE id=%s", (number_id,))
-            query.edit_message_text(
+            safe_edit_message(
+                query,
                 f"❌ Превышен лимит попыток ({MAX_RETRY_COUNT}). Номер отклонён.",
                 reply_markup=back("my_numbers")
             )
             reorder_queue(platform)
+            logger.info(f"Number {number_id} exceeded retry limit")
             return
         
         cur.execute("""
         UPDATE numbers 
         SET status='waiting', taken_by=NULL, 
             code_photo_id=NULL, qr_photo_id=NULL,
-            retry_count=retry_count+1
+            queue_position=NULL, retry_count=retry_count+1
         WHERE id=%s AND user_id=%s
         RETURNING retry_count
         """, (number_id, user_id))
@@ -230,8 +289,10 @@ def retry_number(update, context):
         result = cur.fetchone()
         new_retries = result[0] if result else retries + 1
         reorder_queue(platform)
+        logger.info(f"Number {number_id} retry {new_retries}/{MAX_RETRY_COUNT}")
     
-    query.edit_message_text(
+    safe_edit_message(
+        query,
         f"🔄 Номер возвращён в очередь (попытка {new_retries}/{MAX_RETRY_COUNT})",
         reply_markup=back("my_numbers")
     )
@@ -239,7 +300,7 @@ def retry_number(update, context):
 def cancel_number(update, context):
     query = update.callback_query
     query.answer()
-    number_id = int(query.data.split("_")[1])
+    number_id = int(query.data.split("_")[2])
     user_id = query.from_user.id
     
     with get_cursor(commit=True) as cur:
@@ -250,37 +311,51 @@ def cancel_number(update, context):
             platform = result[0]
             cur.execute("UPDATE numbers SET status='cancelled', in_queue=0, taken_by=NULL WHERE id=%s", (number_id,))
             reorder_queue(platform)
+            logger.info(f"Number {number_id} cancelled by user {user_id}")
     
-    query.edit_message_text("❌ Номер отменен.")
+    safe_edit_message(query, "❌ Номер отменен.")
 
+@role_required(['cold', 'helper', 'owner'])
 def request_extra_info(update, context):
     query = update.callback_query
     query.answer()
-    number_id = int(query.data.split("_")[3])
+    number_id = int(query.data.split("_")[2])
     cold_id = query.from_user.id
+    now = int(time.time())
     
     with get_cursor() as cur:
-        cur.execute("SELECT taken_by FROM numbers WHERE id=%s", (number_id,))
+        cur.execute("SELECT taken_by, last_extra_request FROM numbers WHERE id=%s", (number_id,))
         result = cur.fetchone()
         
         if not result or result[0] != cold_id:
-            query.edit_message_text("❌ Вы не работаете с этим номером.")
+            safe_edit_message(query, "❌ Вы не работаете с этим номером.")
+            return
+        
+        last_extra = result[1] or 0
+        if now - last_extra < EXTRA_REQUEST_COOLDOWN:
+            wait = EXTRA_REQUEST_COOLDOWN - (now - last_extra)
+            safe_edit_message(query, f"❌ Подождите {wait} сек перед следующим запросом.")
             return
     
     context.user_data['extra_number'] = number_id
-    query.edit_message_text(
+    safe_edit_message(
+        query,
         "📝 Введите дополнительную информацию для пользователя:",
         reply_markup=back("my_numbers")
     )
     return WAITING_EXTRA
 
+@role_required(['cold', 'helper', 'owner'])
 def receive_extra_info(update, context):
     extra_text = update.message.text
     cold_id = update.effective_user.id
     number_id = context.user_data.get('extra_number')
     
     if not number_id:
-        update.message.reply_text("❌ Ошибка: номер не найден.")
+        safe_send_message(
+            context.bot, update.effective_chat.id,
+            "❌ Ошибка: номер не найден."
+        )
         return -1
     
     with get_cursor(commit=True) as cur:
@@ -294,20 +369,25 @@ def receive_extra_info(update, context):
         result = cur.fetchone()
         
         if not result:
-            update.message.reply_text("❌ Номер не найден.")
+            safe_send_message(
+                context.bot, update.effective_chat.id,
+                "❌ Номер не найден."
+            )
             return -1
         
         user_id, phone = result
+        logger.info(f"Extra info requested for number {number_id}")
     
-    context.bot.send_message(
-        user_id,
+    safe_send_message(
+        context.bot, user_id,
         f"📝 Холодка запрашивает дополнительную информацию для {phone}:\n\n{extra_text}",
         reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton("📝 Ответить", callback_data=f"extra_reply_{number_id}")
+            InlineKeyboardButton("📝 Ответить", callback_data=f"reply_extra_{number_id}")
         ]])
     )
     
-    update.message.reply_text(
+    safe_send_message(
+        context.bot, update.effective_chat.id,
         "✅ Запрос отправлен пользователю!",
         reply_markup=back("my_numbers")
     )
@@ -326,11 +406,11 @@ def process_extra_reply(update, context):
         result = cur.fetchone()
         
         if not result or result[0] != user_id:
-            query.edit_message_text("❌ Это не ваш номер.")
+            safe_edit_message(query, "❌ Это не ваш номер.")
             return
     
     context.user_data['reply_number'] = number_id
-    query.edit_message_text("📝 Введите ваш ответ:")
+    safe_edit_message(query, "📝 Введите ваш ответ:")
     return WAITING_EXTRA
 
 def save_extra_reply(update, context):
@@ -339,7 +419,10 @@ def save_extra_reply(update, context):
     number_id = context.user_data.get('reply_number')
     
     if not number_id:
-        update.message.reply_text("❌ Ошибка: номер не найден.")
+        safe_send_message(
+            context.bot, update.effective_chat.id,
+            "❌ Ошибка: номер не найден."
+        )
         return -1
     
     with get_cursor() as cur:
@@ -348,18 +431,29 @@ def save_extra_reply(update, context):
         
         if result and result[0]:
             cold_id = result[0]
-            context.bot.send_message(
-                cold_id,
+            safe_send_message(
+                context.bot, cold_id,
                 f"📝 Получен ответ на доп запрос для номера:\n\n{reply_text}"
             )
-            update.message.reply_text("✅ Ответ отправлен холодке!")
+            safe_send_message(
+                context.bot, update.effective_chat.id,
+                "✅ Ответ отправлен холодке!"
+            )
+            logger.info(f"Extra reply sent for number {number_id}")
         else:
-            update.message.reply_text("❌ Холодка не найдена.")
+            safe_send_message(
+                context.bot, update.effective_chat.id,
+                "❌ Холодка не найдена."
+            )
     
     from keyboards import main_menu
     from utils.roles import get_role
     role = get_role(user_id) or 'user'
-    update.message.reply_text("Главное меню:", reply_markup=main_menu(role))
+    safe_send_message(
+        context.bot, update.effective_chat.id,
+        "Главное меню:",
+        reply_markup=main_menu(role)
+    )
     
     context.user_data.pop('reply_number', None)
     return -1

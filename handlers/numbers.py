@@ -1,6 +1,7 @@
 from database import get_cursor
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from keyboards import back
+from main import safe_edit_message
 
 def my_numbers(update, context):
     query = update.callback_query
@@ -10,14 +11,15 @@ def my_numbers(update, context):
     with get_cursor() as cur:
         cur.execute("""
         SELECT id, phone, platform, status FROM numbers 
-        WHERE taken_by=%s AND status NOT IN ('activated', 'crashed', 'failed', 'cancelled')
+        WHERE taken_by=%s AND status IN ('in_progress', 'code_sent', 'code_entered', 'activated')
         ORDER BY created_at DESC
         """, (cold_id,))
         
         rows = cur.fetchall()
     
     if not rows:
-        query.edit_message_text(
+        safe_edit_message(
+            query,
             "📭 У вас нет активных номеров.",
             reply_markup=back("cold_panel")
         )
@@ -35,7 +37,8 @@ def my_numbers(update, context):
     
     buttons.append([InlineKeyboardButton("🔙 В меню", callback_data="cold_panel")])
     
-    query.edit_message_text(
+    safe_edit_message(
+        query,
         "📋 Ваши активные номера:",
         reply_markup=InlineKeyboardMarkup(buttons)
     )

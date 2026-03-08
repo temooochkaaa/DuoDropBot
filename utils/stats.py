@@ -1,6 +1,7 @@
 import time
 from datetime import datetime
 from database import get_cursor
+from config import TIMEZONE
 
 def generate_user_stats(user_id):
     with get_cursor() as cur:
@@ -26,15 +27,15 @@ def generate_user_stats(user_id):
         text += f"   Статус: **{status}**\n"
         
         if created:
-            dt = datetime.fromtimestamp(created)
+            dt = datetime.fromtimestamp(created, TIMEZONE)
             text += f"   📅 Создан: {dt.strftime('%d.%m.%Y %H:%M')}\n"
         
         if activated:
-            dt = datetime.fromtimestamp(activated)
+            dt = datetime.fromtimestamp(activated, TIMEZONE)
             text += f"   ✅ Активирован: {dt.strftime('%d.%m.%Y %H:%M')}\n"
         
         if crashed:
-            dt = datetime.fromtimestamp(crashed)
+            dt = datetime.fromtimestamp(crashed, TIMEZONE)
             text += f"   💥 Слетел: {dt.strftime('%d.%m.%Y %H:%M')}\n"
         
         if work:
@@ -79,7 +80,7 @@ def generate_daily_stats(platform='whatsapp'):
         
         if phone:
             has_data = True
-            time_str = datetime.fromtimestamp(created).strftime('%H:%M')
+            time_str = datetime.fromtimestamp(created, TIMEZONE).strftime('%H:%M')
             status_icon = "✅" if status == 'activated' else "⏳"
             text += f"   {status_icon} {phone} - {time_str}\n"
     

@@ -6,13 +6,14 @@ from database import get_cursor
 from keyboards import helper_panel_menu, back
 from utils.stats import generate_daily_stats
 from config import ALL_NUMBERS_PER_PAGE
+from main import safe_edit_message, safe_send_message
 
 def helper_panel(update, context):
     query = update.callback_query
     query.answer()
-    query.edit_message_text(
+    safe_edit_message(
+        query,
         "👥 **Панель помощника**\n\nВыберите действие:",
-        parse_mode='Markdown',
         reply_markup=helper_panel_menu()
     )
 
@@ -25,13 +26,16 @@ def stats_whatsapp(update, context):
         f.write(stats)
         tmp_path = f.name
     
-    with open(tmp_path, 'rb') as f:
-        context.bot.send_document(
-            chat_id=query.from_user.id,
-            document=f,
-            filename=f"whatsapp_stats_{int(time.time())}.txt",
-            caption="📊 Статистика WhatsApp за сегодня"
-        )
+    try:
+        with open(tmp_path, 'rb') as f:
+            context.bot.send_document(
+                chat_id=query.from_user.id,
+                document=f,
+                filename=f"whatsapp_stats_{int(time.time())}.txt",
+                caption="📊 Статистика WhatsApp за сегодня"
+            )
+    except Exception as e:
+        logger.error(f"Error sending stats: {e}")
     
     time.sleep(1)
     try:
@@ -39,7 +43,8 @@ def stats_whatsapp(update, context):
     except:
         pass
     
-    query.message.reply_text(
+    safe_send_message(
+        context.bot, query.from_user.id,
         "📊 Статистика отправлена.",
         reply_markup=back("helper_panel")
     )
@@ -53,13 +58,16 @@ def stats_max(update, context):
         f.write(stats)
         tmp_path = f.name
     
-    with open(tmp_path, 'rb') as f:
-        context.bot.send_document(
-            chat_id=query.from_user.id,
-            document=f,
-            filename=f"max_stats_{int(time.time())}.txt",
-            caption="📊 Статистика MAX за сегодня"
-        )
+    try:
+        with open(tmp_path, 'rb') as f:
+            context.bot.send_document(
+                chat_id=query.from_user.id,
+                document=f,
+                filename=f"max_stats_{int(time.time())}.txt",
+                caption="📊 Статистика MAX за сегодня"
+            )
+    except Exception as e:
+        logger.error(f"Error sending stats: {e}")
     
     time.sleep(1)
     try:
@@ -67,7 +75,8 @@ def stats_max(update, context):
     except:
         pass
     
-    query.message.reply_text(
+    safe_send_message(
+        context.bot, query.from_user.id,
         "📊 Статистика отправлена.",
         reply_markup=back("helper_panel")
     )
@@ -93,7 +102,8 @@ def all_numbers(update, context):
         total = cur.fetchone()[0]
     
     if not rows:
-        query.edit_message_text(
+        safe_edit_message(
+            query,
             "📭 Нет номеров в очереди.",
             reply_markup=back("helper_panel")
         )
@@ -103,15 +113,14 @@ def all_numbers(update, context):
     
     if page < 0:
         page = 0
-    if page >= total_pages:
+    if page >= total_pages and total_pages > 0:
         page = total_pages - 1
-        offset = page * ALL_NUMBERS_PER_PAGE
     
     text = f"📋 **Все номера** (страница {page+1}/{total_pages}):\n\n"
-    for r in rows:
+    for i, r in enumerate(rows, 1):
         taken = f"👤 {r[4]}" if r[4] else "🆓 свободен"
         emoji = "📱" if r[2] == 'whatsapp' else "📲"
-        text += f"{emoji} #{r[0]} {r[1]} - {r[3]} {taken} (поз.{r[5]})\n"
+        text += f"{i}. {emoji} #{r[0]} {r[1]} - {r[3]} {taken} (поз.{r[5]})\n"
     
     buttons = []
     nav = []
@@ -127,9 +136,9 @@ def all_numbers(update, context):
     
     context.user_data['all_page'] = page
     
-    query.edit_message_text(
+    safe_edit_message(
+        query,
         text,
-        parse_mode='Markdown',
         reply_markup=InlineKeyboardMarkup(buttons)
     )
 
@@ -139,15 +148,19 @@ def all_pagination(update, context):
     direction = query.data.split('_')[1]
     
     page = context.user_data.get('all_page', 0)
-    page = page - 1 if direction == 'prev' else page + 1
-    context.user_data['all_page'] = page
+    if direction == 'prev':
+        page = max(0, page - 1)
+    else:
+        page += 1
     
+    context.user_data['all_page'] = page
     all_numbers(update, context)
 
 def remove_number_start(update, context):
     query = update.callback_query
     query.answer()
-    query.edit_message_text(
+    safe_edit_message(
+        query,
         "🗑 Введите ID номера для удаления:",
         reply_markup=back("helper_panel")
     )
@@ -155,10 +168,14 @@ def remove_number_start(update, context):
     return WAITING_REMOVE_ID
 
 def remove_number_process(update, context):
+    if not update.message:
+        return -1
+        
     try:
         number_id = int(update.message.text.strip())
     except:
-        update.message.reply_text(
+        safe_send_message(
+            context.bot, update.effective_chat.id,
             "❌ Неверный ID. Введите число.",
             reply_markup=back("helper_panel")
         )
@@ -168,15 +185,24 @@ def remove_number_process(update, context):
         cur.execute("""
         UPDATE numbers SET status='cancelled', in_queue=0, taken_by=NULL 
         WHERE id=%s
+        RETURNING platform
         """, (number_id,))
         
-        if cur.rowcount > 0:
-            update.message.reply_text(
+        result = cur.fetchone()
+        
+        if result:
+            platform = result[0]
+            from database import reorder_queue
+            reorder_queue(platform)
+            safe_send_message(
+                context.bot, update.effective_chat.id,
                 f"✅ Номер #{number_id} удален из очереди.",
                 reply_markup=back("helper_panel")
             )
+            logger.info(f"Number {number_id} removed by helper")
         else:
-            update.message.reply_text(
+            safe_send_message(
+                context.bot, update.effective_chat.id,
                 f"❌ Номер #{number_id} не найден.",
                 reply_markup=back("helper_panel")
             )

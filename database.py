@@ -1,13 +1,34 @@
 import os
+import time
 import logging
 import psycopg2
-from psycopg2 import pool
+from psycopg2 import pool, sql
 from psycopg2.extras import DictCursor
 from contextlib import contextmanager
+from functools import wraps
 
-from config import DATABASE_URL, DB_POOL_MIN, DB_POOL_MAX, DB_POOL_TIMEOUT, CLEANUP_DAYS
+from config import (
+    DATABASE_URL, DB_POOL_MIN, DB_POOL_MAX, DB_POOL_TIMEOUT,
+    CLEANUP_DAYS, DB_RETRY_COUNT, DB_RETRY_DELAY
+)
 
 logger = logging.getLogger(__name__)
+
+def db_retry(func):
+    """Декоратор для повторных попыток при ошибках БД"""
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        for attempt in range(DB_RETRY_COUNT):
+            try:
+                return func(*args, **kwargs)
+            except Exception as e:
+                if attempt == DB_RETRY_COUNT - 1:
+                    logger.error(f"Database error after {DB_RETRY_COUNT} attempts: {e}")
+                    raise
+                logger.warning(f"Database error (attempt {attempt + 1}/{DB_RETRY_COUNT}): {e}")
+                time.sleep(DB_RETRY_DELAY * (attempt + 1))
+        return None
+    return wrapper
 
 class DatabasePool:
     def __init__(self):
@@ -33,17 +54,24 @@ class DatabasePool:
         conn = None
         try:
             conn = self.pool.getconn()
+            # Проверяем, что соединение живо
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1")
             yield conn
         except Exception as e:
             logger.error(f"Database connection error: {e}")
+            if conn:
+                # Закрываем проблемное соединение
+                self.pool.putconn(conn, close=True)
             raise
         finally:
-            if conn:
+            if conn and not conn.closed:
                 self.pool.putconn(conn)
     
     @contextmanager
     def get_cursor(self, commit=False):
         with self.get_connection() as conn:
+            conn.autocommit = False
             cur = conn.cursor()
             try:
                 yield cur
@@ -66,11 +94,13 @@ class DatabasePool:
 
 db_pool = DatabasePool()
 
+@db_retry
 def get_cursor(commit=False):
     return db_pool.get_cursor(commit)
 
+@db_retry
 def reorder_queue(platform=None):
-    """Пересчет позиций в очереди"""
+    """Пересчет позиций в очереди с использованием ROW_NUMBER для отображения"""
     with get_cursor(commit=True) as cur:
         if platform:
             cur.execute("""
@@ -97,18 +127,37 @@ def reorder_queue(platform=None):
             WHERE n.id = numbered.id
             """)
 
+@db_retry
 def cleanup_old_numbers():
-    """Очистка старых cancelled номеров"""
+    """Очистка старых номеров (cancelled, failed, crashed старше 30 дней)"""
     with get_cursor(commit=True) as cur:
         cur.execute("""
         DELETE FROM numbers
-        WHERE status='cancelled'
-        AND created_at < EXTRACT(EPOCH FROM NOW() - INTERVAL '%s days')
-        """, (CLEANUP_DAYS,))
+        WHERE status IN ('cancelled', 'failed', 'crashed')
+        AND created_at < %s
+        """, (int(time.time()) - CLEANUP_DAYS * 86400,))
         deleted = cur.rowcount
         if deleted > 0:
-            logger.info(f"Cleaned up {deleted} old cancelled numbers")
+            logger.info(f"Cleaned up {deleted} old numbers")
 
+@db_retry
+def check_stale_numbers():
+    """Автосброс зависших номеров (in_progress > 10 минут)"""
+    ten_min_ago = int(time.time()) - 600
+    
+    with get_cursor(commit=True) as cur:
+        cur.execute("""
+        UPDATE numbers SET status='waiting', taken_by=NULL
+        WHERE status='in_progress' AND created_at < %s
+        RETURNING id
+        """, (ten_min_ago,))
+        
+        stale = cur.rowcount
+        if stale > 0:
+            logger.info(f"Reset {stale} stale numbers")
+            reorder_queue()
+
+@db_retry
 def init_db():
     with get_cursor(commit=True) as cur:
         cur.execute("""
@@ -121,7 +170,9 @@ def init_db():
             referral_count INTEGER DEFAULT 0,
             referral_balance REAL DEFAULT 0,
             accepted INTEGER DEFAULT 0,
-            created_at BIGINT
+            created_at BIGINT,
+            last_button_click BIGINT DEFAULT 0,
+            last_request BIGINT DEFAULT 0
         )
         """)
         
@@ -150,7 +201,8 @@ def init_db():
             extra_request TEXT,
             last_extra_request BIGINT,
             last_queue_notification BIGINT,
-            retry_count INTEGER DEFAULT 0
+            retry_count INTEGER DEFAULT 0,
+            UNIQUE(phone, platform)
         )
         """)
         
@@ -160,10 +212,12 @@ def init_db():
             referrer_id BIGINT,
             referred_id BIGINT,
             status TEXT DEFAULT 'pending',
-            qualified_date BIGINT
+            qualified_date BIGINT,
+            UNIQUE(referrer_id, referred_id)
         )
         """)
         
+        # Индексы
         cur.execute("CREATE INDEX IF NOT EXISTS idx_numbers_status ON numbers(status, taken_by)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_numbers_user ON numbers(user_id)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_numbers_queue ON numbers(queue_position)")
@@ -172,7 +226,10 @@ def init_db():
         cur.execute("CREATE INDEX IF NOT EXISTS idx_numbers_status_inqueue ON numbers(status, in_queue)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_numbers_last_notification ON numbers(last_queue_notification)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_numbers_created ON numbers(created_at)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_numbers_taken_by ON numbers(taken_by)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_numbers_user_status ON numbers(user_id, status)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_users_role ON users(role)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_users_referred ON users(referred_by)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_users_last_click ON users(last_button_click)")
         
         logger.info("Database initialized successfully")
