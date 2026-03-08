@@ -1,10 +1,11 @@
 import logging
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from database import get_cursor, reorder_queue
-from keyboards import back, queue_menu, number_detail_menu
+from keyboards import back, queue_menu, number_detail_menu, main_menu
 from datetime import datetime
 from config import TIMEZONE
 from utils.helpers import safe_edit_message, safe_send_message
+from utils.roles import get_role
 
 logger = logging.getLogger(__name__)
 
@@ -158,11 +159,11 @@ def delete_from_queue(update, context):
                 # Показываем сообщение об успехе
                 query.edit_message_text("✅ Номер успешно удален из очереди.")
                 
-                # Возвращаемся к списку очереди
-                from keyboards import queue_menu
+                # Возвращаемся в главное меню
+                role = get_role(user_id) or 'user'
                 query.message.reply_text(
-                    "📊 Выберите очередь:",
-                    reply_markup=queue_menu()
+                    "Главное меню:",
+                    reply_markup=main_menu(role)
                 )
             else:
                 logger.warning(f"No rows deleted for number {number_id}")
