@@ -1,9 +1,12 @@
+import logging
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from database import get_cursor, reorder_queue
 from keyboards import back, queue_menu, number_detail_menu
 from datetime import datetime
 from config import TIMEZONE
-from utils.helpers import safe_edit_message, safe_send_message  # Вместо from main import ...
+from utils.helpers import safe_edit_message, safe_send_message
+
+logger = logging.getLogger(__name__)
 
 def check_queue(update, context):
     """Главное меню очереди"""
@@ -104,21 +107,50 @@ def delete_from_queue(update, context):
     query = update.callback_query
     query.answer()
     
+    logger.info(f"Delete function called by user {query.from_user.id}")
+    
     try:
-        number_id = int(query.data.split("_")[2])
+        # Парсим ID номера
+        parts = query.data.split("_")
+        logger.info(f"Callback data parts: {parts}")
+        
+        if len(parts) < 3:
+            logger.error(f"Invalid callback data: {query.data}")
+            query.edit_message_text("❌ Ошибка: неверный формат данных.")
+            return
+        
+        number_id = int(parts[2])
         user_id = query.from_user.id
+        logger.info(f"Attempting to delete number {number_id} for user {user_id}")
         
         with get_cursor(commit=True) as cur:
+            # Проверяем, существует ли номер и принадлежит ли пользователю
             cur.execute("""
-            UPDATE numbers SET status='cancelled', in_queue=0, taken_by=NULL 
+            SELECT id, platform FROM numbers 
             WHERE id=%s AND user_id=%s AND status='waiting'
-            RETURNING platform
             """, (number_id, user_id))
             
             result = cur.fetchone()
+            logger.info(f"Number check result: {result}")
             
-            if result:
-                platform = result[0]
+            if not result:
+                logger.warning(f"Number {number_id} not found or not in waiting status")
+                query.edit_message_text("❌ Номер не найден или уже не в очереди.")
+                return
+            
+            platform = result[1]
+            
+            # Удаляем номер
+            cur.execute("""
+            UPDATE numbers SET status='cancelled', in_queue=0, taken_by=NULL 
+            WHERE id=%s AND user_id=%s AND status='waiting'
+            """, (number_id, user_id))
+            
+            deleted = cur.rowcount
+            logger.info(f"Deleted rows: {deleted}")
+            
+            if deleted > 0:
+                # Пересчитываем очередь
                 from database import reorder_queue
                 reorder_queue(platform)
                 logger.info(f"Number {number_id} deleted from queue by user {user_id}")
@@ -126,12 +158,19 @@ def delete_from_queue(update, context):
                 # Показываем сообщение об успехе
                 query.edit_message_text("✅ Номер успешно удален из очереди.")
                 
-                # Возвращаемся к списку очереди через 2 секунды
-                import time
-                time.sleep(2)
-                show_queue(update, context)
+                # Возвращаемся к списку очереди
+                from keyboards import queue_menu
+                query.message.reply_text(
+                    "📊 Выберите очередь:",
+                    reply_markup=queue_menu()
+                )
             else:
-                query.edit_message_text("❌ Номер не найден или уже не в очереди.")
+                logger.warning(f"No rows deleted for number {number_id}")
+                query.edit_message_text("❌ Не удалось удалить номер.")
+                
+    except ValueError as e:
+        logger.error(f"Value error parsing number ID: {e}")
+        query.edit_message_text("❌ Ошибка: неверный ID номера.")
     except Exception as e:
-        logger.error(f"Error deleting number: {e}")
-        query.edit_message_text("❌ Произошла ошибка при удалении.")
+        logger.error(f"Unexpected error deleting number: {e}", exc_info=True)
+        query.edit_message_text("❌ Произошла внутренняя ошибка.")
