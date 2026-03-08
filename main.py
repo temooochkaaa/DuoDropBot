@@ -170,7 +170,8 @@ queue_conv = ConversationHandler(
     name="queue_conv"
 )
 dp.add_handler(queue_conv)
-    dp.add_handler(CallbackQueryHandler(submit_menu_handler, pattern="^submit_menu$"))
+
+dp.add_handler(CallbackQueryHandler(submit_menu_handler, pattern="^submit_menu$"))
     
     whatsapp_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(submit_whatsapp, pattern="^submit_whatsapp$")],
